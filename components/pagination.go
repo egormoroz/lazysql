@@ -9,9 +9,12 @@ import (
 )
 
 type PaginationState struct {
-	Offset       int
-	Limit        int
-	TotalRecords int
+	Offset          int
+	Limit           int
+	VisibleRecords  int
+	TotalRecords    int
+	HasTotalRecords bool
+	HasNextPage     bool
 }
 
 type Pagination struct {
@@ -26,7 +29,7 @@ func NewPagination() *Pagination {
 	wrapper.SetBorder(true)
 
 	textView := tview.NewTextView()
-	textView.SetText(fmt.Sprintf("%s-%s of %s rows", "0", "0", "0"))
+	textView.SetText("0-0 rows")
 	textView.SetTextAlign(tview.AlignCenter)
 
 	wrapper.AddItem(textView, 0, 1, false)
@@ -35,9 +38,12 @@ func NewPagination() *Pagination {
 		Flex:     wrapper,
 		textView: textView,
 		state: &PaginationState{
-			Offset:       0,
-			Limit:        app.App.Config().DefaultPageSize,
-			TotalRecords: 0,
+			Offset:          0,
+			Limit:           app.App.Config().DefaultPageSize,
+			VisibleRecords:  0,
+			TotalRecords:    0,
+			HasTotalRecords: false,
+			HasNextPage:     false,
 		},
 	}
 }
@@ -59,53 +65,65 @@ func (pagination *Pagination) GetIsFirstPage() bool {
 }
 
 func (pagination *Pagination) GetIsLastPage() bool {
-	return pagination.state.Offset >= pagination.state.TotalRecords-1 || pagination.state.Offset+pagination.state.Limit >= pagination.state.TotalRecords
+	return !pagination.state.HasNextPage
+}
+
+func (pagination *Pagination) SetPageStats(visibleRecords int, hasNextPage bool) {
+	pagination.state.VisibleRecords = visibleRecords
+	pagination.state.HasNextPage = hasNextPage
+
+	if pagination.state.HasTotalRecords {
+		// If the page fetch returned no rows, always stop forward paging.
+		// This prevents stale manual counts from causing endless "next page" fetches.
+		if visibleRecords == 0 {
+			pagination.state.HasNextPage = false
+		} else {
+			pagination.state.HasNextPage = pagination.state.Offset+visibleRecords < pagination.state.TotalRecords
+		}
+	}
+
+	pagination.updateText()
 }
 
 func (pagination *Pagination) SetTotalRecords(total int) {
 	pagination.state.TotalRecords = total
+	pagination.state.HasTotalRecords = true
+	pagination.state.HasNextPage = pagination.state.Offset+pagination.state.VisibleRecords < total
+	pagination.updateText()
+}
 
-	offset := pagination.GetOffset()
-	limit := pagination.GetLimit() + offset
-
-	if offset < total {
-		offset++
-	}
-	if limit > total {
-		limit = total
-	}
-
-	pagination.textView.SetText(fmt.Sprintf("%d-%d of %d rows", offset, limit, total))
+func (pagination *Pagination) ClearTotalRecords() {
+	pagination.state.HasTotalRecords = false
+	pagination.state.TotalRecords = 0
+	pagination.updateText()
 }
 
 func (pagination *Pagination) SetLimit(limit int) {
 	pagination.state.Limit = limit
-
-	offset := pagination.GetOffset()
-	total := pagination.GetTotalRecords()
-
-	if offset < total {
-		offset++
-	}
-	if limit > total {
-		limit = total
-	}
-
-	pagination.textView.SetText(fmt.Sprintf("%d-%d of %d rows", offset, limit, total))
+	pagination.updateText()
 }
 
 func (pagination *Pagination) SetOffset(offset int) {
 	pagination.state.Offset = offset
+	pagination.updateText()
+}
 
-	limit := pagination.GetLimit() + offset
-	total := pagination.GetTotalRecords()
+func (pagination *Pagination) updateText() {
+	start := 0
+	end := 0
 
-	if offset < total {
-		offset++
+	if pagination.state.VisibleRecords > 0 {
+		start = pagination.state.Offset + 1
+		end = pagination.state.Offset + pagination.state.VisibleRecords
 	}
-	if limit > total {
-		limit = total
+
+	if pagination.state.HasTotalRecords {
+		if end > pagination.state.TotalRecords {
+			end = pagination.state.TotalRecords
+		}
+		pagination.textView.SetText(fmt.Sprintf("%d-%d of %d rows", start, end, pagination.state.TotalRecords))
+		return
 	}
 
-	pagination.textView.SetText(fmt.Sprintf("%d-%d of %d rows", offset, limit, total))
+	pagination.textView.SetText(fmt.Sprintf("%d-%d rows", start, end))
 }

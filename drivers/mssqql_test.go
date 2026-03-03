@@ -485,9 +485,6 @@ func TestMSSQL_GetRecords(t *testing.T) {
 		WithArgs(0, DefaultRowLimit).
 		WillReturnRows(rows)
 
-	mock.ExpectQuery(fmt.Sprintf("SELECT COUNT\\(\\*\\) FROM \\[%s\\]", tableNameMSSQL)).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
-
 	records, total, _, err := pg.GetRecords(DBNameMSSQL, tableNameMSSQL, "", "", 0, DefaultRowLimit)
 	if err != nil {
 		t.Fatalf("GetRecords failed: %v", err)
@@ -503,8 +500,8 @@ func TestMSSQL_GetRecords(t *testing.T) {
 		t.Fatalf("Expected %v, got %v", expected, records)
 	}
 
-	if total != 2 {
-		t.Fatalf("Expected total 2, got %d", total)
+	if total != -1 {
+		t.Fatalf("Expected total -1, got %d", total)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

@@ -333,8 +333,6 @@ func TestPostgres_GetRecords(t *testing.T) {
 
 	mock.ExpectQuery(fmt.Sprintf(`SELECT \* FROM "%s"."%s" LIMIT \$1 OFFSET \$2`, schemaPostgres, tableNamePostgres)).WithArgs(DefaultRowLimit, 0).WillReturnRows(rows)
 
-	mock.ExpectQuery(fmt.Sprintf(`SELECT COUNT\(\*\) FROM "%s"."%s"`, schemaPostgres, tableNamePostgres)).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
-
 	records, total, _, err := pg.GetRecords(DBNamePostgres, schemaAndTablePostgres, "", "", 0, DefaultRowLimit)
 	if err != nil {
 		t.Fatalf("GetRecords failed: %v", err)
@@ -350,8 +348,8 @@ func TestPostgres_GetRecords(t *testing.T) {
 		t.Fatalf("Expected %v, got %v", expected, records)
 	}
 
-	if total != 2 {
-		t.Fatalf("Expected total 2, got %d", total)
+	if total != -1 {
+		t.Fatalf("Expected total -1, got %d", total)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

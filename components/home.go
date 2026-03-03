@@ -212,25 +212,25 @@ func (home *Home) showTable(databaseName, tableName string) {
 		home.TabbedPane.AppendTab(tableName, table, tabReference)
 	}
 
-	results := table.FetchRecords(func() {
+	table.FetchRecordsAsync(func() {
 		home.focusLeftWrapper()
-	})
-
-	// Show sidebar if there is more then 1 row (row 0 are
-	// the column names) and the sidebar is not disabled.
-	if !app.App.Config().DisableSidebar && len(results) > 1 && !table.GetShowSidebar() {
-		table.ShowSidebar(true)
-	}
-
-	if table.state.error == "" {
-		if !home.treePinned && home.leftWrapperVisible {
-			home.toggleLeftWrapper()
+	}, func(results [][]string) {
+		// Show sidebar if there is more then 1 row (row 0 are
+		// the column names) and the sidebar is not disabled.
+		if !app.App.Config().DisableSidebar && len(results) > 1 && !table.GetShowSidebar() {
+			table.ShowSidebar(true)
 		}
 
-		home.focusRightWrapper()
-	}
+		if table.state.error == "" {
+			if !home.treePinned && home.leftWrapperVisible {
+				home.toggleLeftWrapper()
+			}
 
-	app.App.ForceDraw()
+			home.focusRightWrapper()
+		}
+
+		app.App.ForceDraw()
+	})
 }
 
 func (home *Home) focusRightWrapper() {
@@ -386,11 +386,24 @@ func (home *Home) rightWrapperInputCapture(event *tcell.EventKey) *tcell.EventKe
 
 		if tab != nil {
 			table := tab.Content.(*ResultsTable)
+			logger.Debug("Home PagePrev: received", map[string]any{
+				"table":      table.GetDatabaseAndTableName(),
+				"offset":     table.Pagination.GetOffset(),
+				"limit":      table.Pagination.GetLimit(),
+				"isFirstPage": table.Pagination.GetIsFirstPage(),
+				"isLoading":  table.GetIsLoading(),
+			})
 
 			if ((table.Menu != nil && table.Menu.GetSelectedOption() == 1) ||
 				table.Menu == nil) && !table.Pagination.GetIsFirstPage() && !table.GetIsLoading() {
 				table.Pagination.SetOffset(table.Pagination.GetOffset() - table.Pagination.GetLimit())
-				table.FetchRecords(nil)
+				table.FetchRecordsAsync(nil, func(rows [][]string) {
+					logger.Debug("Home PagePrev: fetch completed", map[string]any{
+						"table":  table.GetDatabaseAndTableName(),
+						"offset": table.Pagination.GetOffset(),
+						"rows":   len(rows),
+					})
+				})
 			}
 		}
 
@@ -403,11 +416,24 @@ func (home *Home) rightWrapperInputCapture(event *tcell.EventKey) *tcell.EventKe
 
 		if tab != nil {
 			table := tab.Content.(*ResultsTable)
+			logger.Debug("Home PageNext: received", map[string]any{
+				"table":      table.GetDatabaseAndTableName(),
+				"offset":     table.Pagination.GetOffset(),
+				"limit":      table.Pagination.GetLimit(),
+				"isLastPage": table.Pagination.GetIsLastPage(),
+				"isLoading":  table.GetIsLoading(),
+			})
 
 			if ((table.Menu != nil && table.Menu.GetSelectedOption() == 1) ||
 				table.Menu == nil) && !table.Pagination.GetIsLastPage() && !table.GetIsLoading() {
 				table.Pagination.SetOffset(table.Pagination.GetOffset() + table.Pagination.GetLimit())
-				table.FetchRecords(nil)
+				table.FetchRecordsAsync(nil, func(rows [][]string) {
+					logger.Debug("Home PageNext: fetch completed", map[string]any{
+						"table":  table.GetDatabaseAndTableName(),
+						"offset": table.Pagination.GetOffset(),
+						"rows":   len(rows),
+					})
+				})
 			}
 		}
 	}
@@ -478,7 +504,7 @@ func (home *Home) homeInputCapture(event *tcell.EventKey) *tcell.EventKey {
 					}
 				}
 				home.ListOfDBChanges = []models.DBDMLChange{}
-				table.FetchRecords(nil)
+				table.FetchRecordsAsync(nil, nil)
 				home.Tree.ForceRemoveHighlight()
 			})
 

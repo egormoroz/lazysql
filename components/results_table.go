@@ -4,6 +4,8 @@ import (
 	"cmp"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/google/uuid"
@@ -23,6 +25,7 @@ type ResultsTableState struct {
 	listOfDBChanges       *[]models.DBDMLChange
 	error                 string
 	currentSort           string
+	currentFilter         string
 	databaseName          string
 	tableName             string
 	primaryKeyColumnNames []string
@@ -58,6 +61,8 @@ type ResultsTable struct {
 	connectionIdentifier string
 	ConnectionURL        string
 	ReadOnly             bool
+	queryMu              sync.Mutex
+	queryInFlight        bool
 }
 
 func NewResultsTable(listOfDBChanges *[]models.DBDMLChange, tree *Tree, dbdriver drivers.Driver, connectionIdentifier string, connectionURL string, readOnly bool) *ResultsTable {
@@ -132,7 +137,7 @@ func NewResultsTable(listOfDBChanges *[]models.DBDMLChange, tree *Tree, dbdriver
 
 	table.SetSelectionChangedFunc(func(_, _ int) {
 		if table.GetShowSidebar() {
-			go table.UpdateSidebar()
+			table.UpdateSidebar()
 		}
 	})
 
@@ -402,9 +407,7 @@ func (table *ResultsTable) tableInputCapture(event *tcell.EventKey) *tcell.Event
 				app.App.SetFocus(table.Loading)
 			}
 			table.Menu.SetSelectedOption(1)
-			if err := table.FetchRecords(nil); err != nil {
-				return event
-			}
+			table.FetchRecordsAsync(nil, nil)
 		}
 	}
 
@@ -553,6 +556,9 @@ func (table *ResultsTable) tableInputCapture(event *tcell.EventKey) *tcell.Event
 	} else if command == commands.ExportCSV {
 		table.showCSVExportModal()
 		return nil
+	} else if command == commands.CountAllRecords {
+		table.CountAllRecords()
+		return nil
 	}
 
 	if len(table.GetRecords()) > 0 {
@@ -568,7 +574,87 @@ func (table *ResultsTable) tableInputCapture(event *tcell.EventKey) *tcell.Event
 		}
 	}
 
+	isDownEvent := event.Key() == tcell.KeyDown || (event.Key() == tcell.KeyRune && event.Rune() == 'j')
+	if isDownEvent && table.tryAutoPaginate(1, selectedRowIndex, selectedColumnIndex, rowCount) {
+		return nil
+	}
+
+	isUpEvent := event.Key() == tcell.KeyUp || (event.Key() == tcell.KeyRune && event.Rune() == 'k')
+	if isUpEvent && table.tryAutoPaginate(-1, selectedRowIndex, selectedColumnIndex, rowCount) {
+		return nil
+	}
+
 	return event
+}
+
+func (table *ResultsTable) tryAutoPaginate(direction, selectedRowIndex, selectedColumnIndex, rowCount int) bool {
+	logger.Debug("tryAutoPaginate: called", map[string]any{
+		"direction":           direction,
+		"selectedRowIndex":    selectedRowIndex,
+		"selectedColumnIndex": selectedColumnIndex,
+		"rowCount":            rowCount,
+		"offset":              table.Pagination.GetOffset(),
+		"limit":               table.Pagination.GetLimit(),
+		"isLastPage":          table.Pagination.GetIsLastPage(),
+		"isFirstPage":         table.Pagination.GetIsFirstPage(),
+		"isLoading":           table.GetIsLoading(),
+		"isEditing":           table.GetIsEditing(),
+		"isFiltering":         table.GetIsFiltering(),
+	})
+
+	if table.Menu == nil || table.Menu.GetSelectedOption() != 1 {
+		logger.Debug("tryAutoPaginate: skipped (not records menu)", nil)
+		return false
+	}
+	if table.GetIsLoading() || table.GetIsEditing() || table.GetIsFiltering() {
+		logger.Debug("tryAutoPaginate: skipped (busy state)", nil)
+		return false
+	}
+
+	switch direction {
+	case 1:
+		if selectedRowIndex != rowCount-1 || table.Pagination.GetIsLastPage() {
+			logger.Debug("tryAutoPaginate: skipped next page", map[string]any{
+				"atLastRow":    selectedRowIndex == rowCount-1,
+				"paginationEOF": table.Pagination.GetIsLastPage(),
+			})
+			return false
+		}
+		logger.Debug("tryAutoPaginate: fetching next page", map[string]any{"offsetBefore": table.Pagination.GetOffset()})
+		table.Pagination.SetOffset(table.Pagination.GetOffset() + table.Pagination.GetLimit())
+		table.FetchRecordsAsync(nil, func(rows [][]string) {
+			logger.Debug("tryAutoPaginate: next page fetched", map[string]any{"rows": len(rows), "offsetAfter": table.Pagination.GetOffset()})
+			if len(rows) <= 1 {
+				return
+			}
+
+			targetCol := min(selectedColumnIndex, table.GetColumnCount()-1)
+			table.Select(1, max(targetCol, 0))
+		})
+		return true
+	case -1:
+		if selectedRowIndex != 1 || table.Pagination.GetIsFirstPage() {
+			logger.Debug("tryAutoPaginate: skipped previous page", map[string]any{
+				"atFirstDataRow": selectedRowIndex == 1,
+				"isFirstPage":    table.Pagination.GetIsFirstPage(),
+			})
+			return false
+		}
+		logger.Debug("tryAutoPaginate: fetching previous page", map[string]any{"offsetBefore": table.Pagination.GetOffset()})
+		table.Pagination.SetOffset(table.Pagination.GetOffset() - table.Pagination.GetLimit())
+		table.FetchRecordsAsync(nil, func(rows [][]string) {
+			logger.Debug("tryAutoPaginate: previous page fetched", map[string]any{"rows": len(rows), "offsetAfter": table.Pagination.GetOffset()})
+			if len(rows) <= 1 {
+				return
+			}
+
+			targetCol := min(selectedColumnIndex, table.GetColumnCount()-1)
+			table.Select(max(len(rows)-1, 1), max(targetCol, 0))
+		})
+		return true
+	default:
+		return false
+	}
 }
 
 func (table *ResultsTable) UpdateRows(rows [][]string) {
@@ -638,16 +724,16 @@ func (table *ResultsTable) subscribeToFilterChanges() {
 		switch stateChange.Key {
 		case eventResultsTableFiltering:
 			if stateChange.Value != "" {
-				rows := table.FetchRecords(nil)
-
-				if len(rows) > 0 {
-					table.Menu.SetSelectedOption(1)
-					App.SetFocus(table)
-					table.HighlightTable()
-					table.Filter.HighlightLocal()
-					table.SetInputCapture(table.tableInputCapture)
-					App.ForceDraw()
-				}
+				table.FetchRecordsAsync(nil, func(rows [][]string) {
+					if len(rows) > 0 {
+						table.Menu.SetSelectedOption(1)
+						App.SetFocus(table)
+						table.HighlightTable()
+						table.Filter.HighlightLocal()
+						table.SetInputCapture(table.tableInputCapture)
+						App.ForceDraw()
+					}
+				})
 				/* else if len(rows) == 1 {
 					table.SetInputCapture(nil)
 					App.SetFocus(table.Filter.Input)
@@ -696,6 +782,7 @@ func (table *ResultsTable) subscribeToEditorChanges() {
 					App.Draw()
 
 					rows, records, err := table.DBDriver.ExecuteQuery(query)
+					table.Pagination.SetPageStats(records, false)
 					table.Pagination.SetTotalRecords(records)
 					table.Pagination.SetLimit(records)
 
@@ -917,9 +1004,11 @@ func (table *ResultsTable) SetResultsInfo(text string) {
 }
 
 func (table *ResultsTable) SetLoading(show bool) {
-	App.QueueUpdateDraw(func() {
-		table.state.isLoading = show
+	table.state.isLoading = show
 
+	// Schedule UI updates asynchronously to avoid deadlocks when called
+	// from input-capture handlers running on the UI event loop.
+	go App.QueueUpdateDraw(func() {
 		if show {
 			table.Page.ShowPage(pageNameTableLoading)
 			App.SetFocus(table.Loading)
@@ -946,28 +1035,40 @@ func (table *ResultsTable) SetCurrentSort(sort string) {
 	table.state.currentSort = sort
 }
 
+func (table *ResultsTable) beginQuery(op string) bool {
+	table.queryMu.Lock()
+	defer table.queryMu.Unlock()
+
+	if table.queryInFlight {
+		logger.Debug("query skipped: already in flight", map[string]any{"op": op, "table": table.GetDatabaseAndTableName()})
+		return false
+	}
+
+	table.queryInFlight = true
+	table.SetLoading(true)
+	logger.Debug("query begin", map[string]any{"op": op, "table": table.GetDatabaseAndTableName()})
+	return true
+}
+
+func (table *ResultsTable) endQuery(op string) {
+	table.queryMu.Lock()
+	table.queryInFlight = false
+	table.queryMu.Unlock()
+
+	table.SetLoading(false)
+	logger.Debug("query end", map[string]any{"op": op, "table": table.GetDatabaseAndTableName()})
+}
+
 func (table *ResultsTable) SetSortedBy(column string, direction string) {
 	sort := fmt.Sprintf("%s %s", column, direction)
 
-	if table.GetCurrentSort() != sort {
-		where := ""
-		if table.Filter != nil {
-			where = table.Filter.GetCurrentFilter()
-		}
-		table.SetLoading(true)
-		records, _, _, err := table.DBDriver.GetRecords(table.GetDatabaseName(), table.GetTableName(), where, sort, table.Pagination.GetOffset(), table.Pagination.GetLimit())
-		table.SetLoading(false)
+	if table.GetCurrentSort() == sort {
+		return
+	}
 
-		if err != nil {
-			table.SetError(err.Error(), nil)
-		} else {
-			previousRow, previousColumn := table.GetSelection()
-			table.SetRecords(records)
-			table.Select(previousRow, previousColumn)
-			App.ForceDraw()
-		}
-
-		table.SetCurrentSort(sort)
+	table.SetCurrentSort(sort)
+	table.FetchRecordsAsync(nil, func(_ [][]string) {
+		previousRow, previousColumn := table.GetSelection()
 
 		columns := table.GetColumns()
 		iconDirection := "▲"
@@ -985,13 +1086,79 @@ func (table *ResultsTable) SetSortedBy(column string, direction string) {
 
 				if col[0] == column {
 					tableCell.SetText(fmt.Sprintf("%s %s", col[0], iconDirection))
-					table.SetCell(0, i-1, tableCell)
-				} else {
-					table.SetCell(0, i-1, tableCell)
 				}
+
+				table.SetCell(0, i-1, tableCell)
 			}
 		}
+
+		table.Select(previousRow, previousColumn)
+		App.ForceDraw()
+	})
+}
+
+func (table *ResultsTable) limitRecordsForPagination(records [][]string) ([][]string, bool) {
+	limit := table.Pagination.GetLimit()
+	if len(records) == 0 {
+		return records, false
 	}
+
+	dataRows := max(len(records)-1, 0)
+	if dataRows <= limit {
+		return records, false
+	}
+
+	return records[:limit+1], true
+}
+
+func (table *ResultsTable) CountAllRecords() {
+	if table.Menu != nil && table.Menu.GetSelectedOption() != 1 {
+		return
+	}
+
+	tableName := table.GetTableName()
+	databaseName := table.GetDatabaseName()
+	if tableName == "" || databaseName == "" {
+		return
+	}
+
+	where := ""
+	if table.Filter != nil {
+		where = table.Filter.GetCurrentFilter()
+	}
+
+	if !table.beginQuery("CountAllRecords") {
+		return
+	}
+
+	go func(databaseName, tableName, where string) {
+		start := time.Now()
+		totalRecords, err := table.DBDriver.CountRecords(databaseName, tableName, where)
+		errText := ""
+		if err != nil {
+			errText = err.Error()
+		}
+
+		logger.Debug("CountAllRecords: query finished", map[string]any{
+			"database":   databaseName,
+			"table":      tableName,
+			"where":      where,
+			"durationMs": time.Since(start).Milliseconds(),
+			"error":      errText,
+		})
+
+		App.QueueUpdateDraw(func() {
+			defer table.endQuery("CountAllRecords")
+
+			if err != nil {
+				table.SetError(err.Error(), nil)
+				return
+			}
+
+			table.Pagination.SetTotalRecords(totalRecords)
+			App.ForceDraw()
+		})
+	}(databaseName, tableName, where)
 }
 
 func (table *ResultsTable) SetPrimaryKeyColumnNames(primaryKeyColumnNames []string) {
@@ -999,78 +1166,154 @@ func (table *ResultsTable) SetPrimaryKeyColumnNames(primaryKeyColumnNames []stri
 }
 
 func (table *ResultsTable) FetchRecords(onError func()) [][]string {
+	ch := make(chan [][]string, 1)
+	started := table.FetchRecordsAsync(onError, func(rows [][]string) {
+		ch <- rows
+	})
+	if !started {
+		return [][]string{}
+	}
+	return <-ch
+}
+
+func (table *ResultsTable) FetchRecordsAsync(onError func(), onDone func(rows [][]string)) bool {
 	tableName := table.GetTableName()
 	databaseName := table.GetDatabaseName()
-
-	table.SetLoading(true)
 
 	where := ""
 	if table.Filter != nil {
 		where = table.Filter.GetCurrentFilter()
 	}
 	sort := table.GetCurrentSort()
-
-	records, totalRecords, executedQuery, err := table.DBDriver.GetRecords(databaseName, tableName, where, sort, table.Pagination.GetOffset(), table.Pagination.GetLimit())
-
-	if err != nil {
-		table.SetError(err.Error(), onError)
-		table.SetLoading(false)
-	} else {
-		// Add filter query to history if a filter was applied and a query was executed
-		if where != "" && executedQuery != "" {
-			if err := history.AddQueryToHistory(table.connectionIdentifier, executedQuery); err != nil {
-				logger.Error("Failed to add filter query to history", map[string]any{"error": err, "query": executedQuery, "connection": table.connectionIdentifier})
-			}
-		}
-
-		if table.GetIsFiltering() {
-			table.SetIsFiltering(false)
-		}
-
-		columns, err := table.DBDriver.GetTableColumns(databaseName, tableName)
-		if err != nil {
-			table.SetError(err.Error(), nil)
-		}
-
-		constraints, err := table.DBDriver.GetConstraints(databaseName, tableName)
-		if err != nil {
-			table.SetError(err.Error(), nil)
-		}
-
-		foreignKeys, err := table.DBDriver.GetForeignKeys(databaseName, tableName)
-		if err != nil {
-			table.SetError(err.Error(), nil)
-		}
-
-		indexes, err := table.DBDriver.GetIndexes(databaseName, tableName)
-		if err != nil {
-			table.SetError(err.Error(), nil)
-		}
-
-		primaryKeyColumnNames, err := table.DBDriver.GetPrimaryKeyColumnNames(databaseName, tableName)
-		if err != nil {
-			table.SetError(err.Error(), nil)
-		}
-
-		if len(records) > 0 {
-			table.SetRecords(records)
-		}
-
-		table.SetColumns(columns)
-		table.SetConstraints(constraints)
-		table.SetForeignKeys(foreignKeys)
-		table.SetIndexes(indexes)
-		table.SetPrimaryKeyColumnNames(primaryKeyColumnNames)
-		table.Select(1, 0)
-
-		table.Pagination.SetTotalRecords(totalRecords)
-
-		table.SetLoading(false)
-
-		return records
+	if where != table.state.currentFilter {
+		table.Pagination.ClearTotalRecords()
+		table.state.currentFilter = where
 	}
 
-	return [][]string{}
+	fetchLimit := table.Pagination.GetLimit() + 1
+	offset := table.Pagination.GetOffset()
+
+	if !table.beginQuery("FetchRecords") {
+		return false
+	}
+
+	logger.Debug("FetchRecords: starting", map[string]any{
+		"database":   databaseName,
+		"table":      tableName,
+		"where":      where,
+		"sort":       sort,
+		"offset":     offset,
+		"pageLimit":  table.Pagination.GetLimit(),
+		"fetchLimit": fetchLimit,
+	})
+
+	go func(databaseName, tableName, where, sort string, offset, fetchLimit int, onError func(), onDone func(rows [][]string)) {
+		start := time.Now()
+		records, _, executedQuery, err := table.DBDriver.GetRecords(databaseName, tableName, where, sort, offset, fetchLimit)
+		errText := ""
+		if err != nil {
+			errText = err.Error()
+		}
+		logger.Debug("FetchRecords: GetRecords finished", map[string]any{
+			"database":   databaseName,
+			"table":      tableName,
+			"durationMs": time.Since(start).Milliseconds(),
+			"rowsRaw":    len(records),
+			"error":      errText,
+		})
+
+		var columns [][]string
+		var constraints [][]string
+		var foreignKeys [][]string
+		var indexes [][]string
+		var primaryKeyColumnNames []string
+		var columnsErr, constraintsErr, foreignKeysErr, indexesErr, pkErr error
+
+		if err == nil {
+			columns, columnsErr = table.DBDriver.GetTableColumns(databaseName, tableName)
+			constraints, constraintsErr = table.DBDriver.GetConstraints(databaseName, tableName)
+			foreignKeys, foreignKeysErr = table.DBDriver.GetForeignKeys(databaseName, tableName)
+			indexes, indexesErr = table.DBDriver.GetIndexes(databaseName, tableName)
+			primaryKeyColumnNames, pkErr = table.DBDriver.GetPrimaryKeyColumnNames(databaseName, tableName)
+		}
+
+		App.QueueUpdateDraw(func() {
+			defer table.endQuery("FetchRecords")
+
+			if err != nil {
+				table.SetError(err.Error(), onError)
+				logger.Error("FetchRecords: failed", map[string]any{
+					"database": databaseName,
+					"table":    tableName,
+					"offset":   offset,
+					"limit":    fetchLimit,
+					"error":    err.Error(),
+				})
+				if onDone != nil {
+					onDone([][]string{})
+				}
+				return
+			}
+
+			records, hasNextPage := table.limitRecordsForPagination(records)
+			table.Pagination.SetPageStats(max(len(records)-1, 0), hasNextPage)
+			logger.Debug("FetchRecords: pagination computed", map[string]any{
+				"rowsVisible": max(len(records)-1, 0),
+				"hasNextPage": hasNextPage,
+				"offset":      table.Pagination.GetOffset(),
+			})
+
+			if where != "" && executedQuery != "" {
+				if err := history.AddQueryToHistory(table.connectionIdentifier, executedQuery); err != nil {
+					logger.Error("Failed to add filter query to history", map[string]any{"error": err, "query": executedQuery, "connection": table.connectionIdentifier})
+				}
+			}
+
+			if table.GetIsFiltering() {
+				table.SetIsFiltering(false)
+			}
+
+			if columnsErr != nil {
+				table.SetError(columnsErr.Error(), nil)
+			}
+			if constraintsErr != nil {
+				table.SetError(constraintsErr.Error(), nil)
+			}
+			if foreignKeysErr != nil {
+				table.SetError(foreignKeysErr.Error(), nil)
+			}
+			if indexesErr != nil {
+				table.SetError(indexesErr.Error(), nil)
+			}
+			if pkErr != nil {
+				table.SetError(pkErr.Error(), nil)
+			}
+
+			if len(records) > 0 {
+				table.SetRecords(records)
+			}
+
+			table.SetColumns(columns)
+			table.SetConstraints(constraints)
+			table.SetForeignKeys(foreignKeys)
+			table.SetIndexes(indexes)
+			table.SetPrimaryKeyColumnNames(primaryKeyColumnNames)
+			table.Select(1, 0)
+
+			logger.Debug("FetchRecords: completed", map[string]any{
+				"database":   databaseName,
+				"table":      tableName,
+				"rowsFinal":  len(records),
+				"durationMs": time.Since(start).Milliseconds(),
+			})
+
+			if onDone != nil {
+				onDone(records)
+			}
+		})
+	}(databaseName, tableName, where, sort, offset, fetchLimit, onError, onDone)
+
+	return true
 }
 
 func (table *ResultsTable) StartEditingCell(row int, col int, callback func(newValue string, row, col int)) {

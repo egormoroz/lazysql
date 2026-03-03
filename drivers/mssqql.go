@@ -382,6 +382,21 @@ func (db *MSSQL) GetRecords(database, table, where, sort string, offset, limit i
 		return nil, 0, displayQueryString, err
 	}
 
+	// Replace the limit and offset with actual values in the query string
+	displayQueryString = fmt.Sprintf("%s ORDER BY %s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", baseQuery, sort, offset, limit)
+
+	return results, -1, displayQueryString, nil
+}
+
+func (db *MSSQL) CountRecords(database, table, where string) (int, error) {
+	if database == "" {
+		return 0, errors.New("database name is required")
+	}
+
+	if table == "" {
+		return 0, errors.New("table name is required")
+	}
+
 	countQuery := "USE "
 	countQuery += database
 	countQuery += "; "
@@ -392,16 +407,13 @@ func (db *MSSQL) GetRecords(database, table, where, sort string, offset, limit i
 		countQuery += fmt.Sprintf(" %s", where)
 	}
 
-	totalRecords = 0
+	totalRecords := 0
 	countRow := db.Connection.QueryRow(countQuery)
 	if err := countRow.Scan(&totalRecords); err != nil {
-		return results, 0, displayQueryString, err // Return display query even on count error
+		return 0, err
 	}
 
-	// Replace the limit and offset with actual values in the query string
-	displayQueryString = fmt.Sprintf("%s ORDER BY %s OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", baseQuery, sort, offset, limit)
-
-	return results, totalRecords, displayQueryString, nil
+	return totalRecords, nil
 }
 
 func (db *MSSQL) UpdateRecord(database, table, column, value, primaryKeyColumnName, primaryKeyValue string) error {

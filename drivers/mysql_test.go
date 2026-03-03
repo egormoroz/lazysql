@@ -1394,16 +1394,13 @@ func TestMySQL_GetRecords(t *testing.T) {
 		WithArgs(0, DefaultRowLimit).
 		WillReturnRows(rows)
 
-	mock.ExpectQuery(fmt.Sprintf("SELECT COUNT\\(\\*\\) FROM %s", mysql.formatTableName(testDBNameMySQL, testDBTableNameMySQL))).
-		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(2))
-
 	records, total, _, err := mysql.GetRecords(testDBNameMySQL, testDBTableNameMySQL, "", "", 0, DefaultRowLimit)
 	if err != nil {
 		t.Fatalf("GetRecords failed: %v", err)
 	}
 
-	if total != 2 {
-		t.Fatalf("Expected total 2, got %d", total)
+	if total != -1 {
+		t.Fatalf("Expected total -1, got %d", total)
 	}
 
 	expectedRecords := [][]string{

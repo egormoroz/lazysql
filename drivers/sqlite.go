@@ -358,20 +358,30 @@ func (db *SQLite) GetRecords(_, table, where, sort string, offset, limit int) (p
 		return nil, 0, queryString, err
 	}
 
-	countQuery := "SELECT COUNT(*) FROM "
-	countQuery += db.formatTableName(table)
-	if where != "" { // Add WHERE clause to count query as well if it exists
-		countQuery += fmt.Sprintf(" %s", where)
-	}
-	countRow := db.Connection.QueryRow(countQuery)
-	if err := countRow.Scan(&totalRecords); err != nil {
-		return paginatedResults, 0, queryString, err
-	}
-
 	// Replace the limit and offset with actual values in the query string
 	queryString = strings.Replace(queryString, "?, ?", fmt.Sprintf("%d, %d", offset, limit), 1)
 
-	return paginatedResults, totalRecords, queryString, nil
+	return paginatedResults, -1, queryString, nil
+}
+
+func (db *SQLite) CountRecords(_, table, where string) (int, error) {
+	if table == "" {
+		return 0, errors.New("table name is required")
+	}
+
+	countQuery := "SELECT COUNT(*) FROM "
+	countQuery += db.formatTableName(table)
+	if where != "" {
+		countQuery += fmt.Sprintf(" %s", where)
+	}
+
+	totalRecords := 0
+	countRow := db.Connection.QueryRow(countQuery)
+	if err := countRow.Scan(&totalRecords); err != nil {
+		return 0, err
+	}
+
+	return totalRecords, nil
 }
 
 func (db *SQLite) ExecuteQuery(query string) ([][]string, int, error) {

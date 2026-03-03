@@ -14,6 +14,7 @@ type Driver interface {
 	GetForeignKeys(database, table string) ([][]string, error)
 	GetIndexes(database, table string) ([][]string, error)
 	GetRecords(database, table, where, sort string, offset, limit int) ([][]string, int, string, error)
+	CountRecords(database, table, where string) (int, error)
 	UpdateRecord(database, table, column, value, primaryKeyColumnName, primaryKeyValue string) error
 	DeleteRecord(database, table string, primaryKeyColumnName, primaryKeyValue string) error
 	ExecuteDMLStatement(query string) (string, error)

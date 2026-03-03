@@ -365,23 +365,36 @@ func (db *MySQL) GetRecords(database, table, where, sort string, offset, limit i
 		return nil, 0, queryString, err
 	}
 
-	countQuery := "SELECT COUNT(*) FROM "
-	countQuery += fmt.Sprintf("`%s`.", database)
-	countQuery += fmt.Sprintf("`%s`", table)
-	if where != "" { // Add WHERE clause to count query as well if it exists
-		countQuery += fmt.Sprintf(" %s", where)
-	}
-	countRow := db.Connection.QueryRow(countQuery)
-	if err := countRow.Scan(&totalRecords); err != nil {
-		// Return the main query string even if count fails, for debugging.
-		return paginatedResults, 0, queryString, err
-	}
-
 	// Replace the limit and offset with actual values in the query string
 	queryString = strings.Replace(queryString, "?", strconv.Itoa(offset), 1)
 	queryString = strings.Replace(queryString, "?", strconv.Itoa(limit), 1)
 
-	return paginatedResults, totalRecords, queryString, nil
+	return paginatedResults, -1, queryString, nil
+}
+
+func (db *MySQL) CountRecords(database, table, where string) (int, error) {
+	if table == "" {
+		return 0, errors.New("table name is required")
+	}
+
+	if database == "" {
+		return 0, errors.New("database name is required")
+	}
+
+	countQuery := "SELECT COUNT(*) FROM "
+	countQuery += fmt.Sprintf("`%s`.", database)
+	countQuery += fmt.Sprintf("`%s`", table)
+	if where != "" {
+		countQuery += fmt.Sprintf(" %s", where)
+	}
+
+	totalRecords := 0
+	countRow := db.Connection.QueryRow(countQuery)
+	if err := countRow.Scan(&totalRecords); err != nil {
+		return 0, err
+	}
+
+	return totalRecords, nil
 }
 
 func (db *MySQL) ExecuteQuery(query string) ([][]string, int, error) {

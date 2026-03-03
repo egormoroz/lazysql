@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	// import postgresql driver
 	_ "github.com/lib/pq"
@@ -494,8 +495,26 @@ func (db *Postgres) GetRecords(database, table, where, sort string, offset, limi
 		limit = DefaultRowLimit
 	}
 
+	start := time.Now()
+	logger.Debug("Postgres GetRecords: query start", map[string]any{
+		"database": database,
+		"table":    table,
+		"where":    where,
+		"sort":     sort,
+		"offset":   offset,
+		"limit":    limit,
+	})
+
 	paginatedRows, err := db.Connection.Query(queryString, limit, offset)
 	if err != nil {
+		logger.Error("Postgres GetRecords: query failed", map[string]any{
+			"database":   database,
+			"table":      table,
+			"offset":     offset,
+			"limit":      limit,
+			"durationMs": time.Since(start).Milliseconds(),
+			"error":      err.Error(),
+		})
 		return nil, 0, queryString, err
 	}
 	defer paginatedRows.Close()
@@ -542,24 +561,59 @@ func (db *Postgres) GetRecords(database, table, where, sort string, offset, limi
 		return nil, 0, queryString, err
 	}
 
-	countQuery := "SELECT COUNT(*) FROM "
-	countQuery += formattedTableName
-
-	if where != "" {
-		countQuery += fmt.Sprintf(" %s", where)
-	}
-
-	countRow := db.Connection.QueryRow(countQuery)
-
-	if err := countRow.Scan(&totalRecords); err != nil {
-		return records, 0, queryString, err
-	}
+	logger.Debug("Postgres GetRecords: query finished", map[string]any{
+		"database":   database,
+		"table":      table,
+		"offset":     offset,
+		"limit":      limit,
+		"rows":       len(records),
+		"durationMs": time.Since(start).Milliseconds(),
+	})
 
 	// Replace the limit and offset with actual values in the query string
 	queryString = strings.Replace(queryString, "$1", strconv.Itoa(limit), 1)
 	queryString = strings.Replace(queryString, "$2", strconv.Itoa(offset), 1)
 
-	return records, totalRecords, queryString, nil
+	return records, -1, queryString, nil
+}
+
+func (db *Postgres) CountRecords(database, table, where string) (int, error) {
+	if database == "" {
+		return 0, errors.New("database name is required")
+	}
+	if table == "" {
+		return 0, errors.New("table name is required")
+	}
+
+	formattedTableName, err := db.formatTableName(table)
+	if err != nil {
+		return 0, err
+	}
+
+	if database != db.CurrentDatabase {
+		err := db.SwitchDatabase(database)
+		if err != nil {
+			return 0, err
+		}
+
+		defer func() {
+			_ = db.SwitchDatabase(db.PreviousDatabase)
+		}()
+	}
+
+	countQuery := "SELECT COUNT(*) FROM "
+	countQuery += formattedTableName
+	if where != "" {
+		countQuery += fmt.Sprintf(" %s", where)
+	}
+
+	totalRecords := 0
+	countRow := db.Connection.QueryRow(countQuery)
+	if err := countRow.Scan(&totalRecords); err != nil {
+		return 0, err
+	}
+
+	return totalRecords, nil
 }
 
 func (db *Postgres) UpdateRecord(database, table, column, value, primaryKeyColumnName, primaryKeyValue string) error {

@@ -84,6 +84,7 @@ const (
 
 	// Export
 	ExportCSV
+	CountAllRecords
 )
 
 func (c Command) String() string {
@@ -226,6 +227,8 @@ func (c Command) String() string {
 		return "ToggleJSONViewerWrap"
 	case ExportCSV:
 		return "ExportCSV"
+	case CountAllRecords:
+		return "CountAllRecords"
 	}
 
 	return "Unknown"

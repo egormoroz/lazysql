@@ -229,7 +229,14 @@ func NewTree(dbName string, dbdriver drivers.Driver, schemas []string) *Tree {
 				tree.SetCurrentNode(lastNode)
 			}
 		case commands.GotoTop:
-			tree.SetCurrentNode(rootNode)
+			children := tree.GetRoot().GetChildren()
+			if len(children) > 0 {
+				tree.SetCurrentNode(children[0])
+			} else {
+				tree.SetCurrentNode(rootNode)
+			}
+			// Force viewport to top and keep current node visible/selected.
+			tree.Move(-1_000_000)
 		case commands.PageNext:
 			tree.Move(5)
 		case commands.PagePrev:

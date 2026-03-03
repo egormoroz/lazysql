@@ -477,7 +477,9 @@ func (home *Home) homeInputCapture(event *tcell.EventKey) *tcell.EventKey {
 		}
 	case commands.Quit:
 		if tab == nil || (!table.GetIsEditing() && !table.GetIsFiltering()) {
-			app.App.Stop()
+			if app.App.ShouldQuit(event) {
+				app.App.Stop()
+			}
 		}
 	case commands.Save:
 		if home.ReadOnly {

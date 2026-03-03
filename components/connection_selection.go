@@ -131,7 +131,11 @@ func NewConnectionSelection(connectionForm *ConnectionForm, connectionPages *mod
 			connectionPages.SwitchToPage(pageNameConnectionForm)
 		case commands.Quit:
 			if wrapper.HasFocus() {
-				app.App.Stop()
+				if app.App.ShouldQuit(event) {
+					app.App.Stop()
+					return nil
+				}
+				cs.StatusText.SetText("Press q again to quit (or Ctrl+W to quit immediately)").SetTextColor(app.Styles.TertiaryTextColor)
 			}
 		}
 

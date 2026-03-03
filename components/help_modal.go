@@ -90,6 +90,7 @@ func NewHelpModal() *HelpModal {
 		command := app.Keymaps.Group(app.HomeGroup).Resolve(event)
 
 		if command == commands.Quit || command == commands.HelpPopup || event.Key() == tcell.KeyEsc {
+			app.App.ClearQuitAttempt()
 			modal.showSearchBar(false)
 			mainPages.RemovePage(pageNameHelp)
 		}

@@ -466,12 +466,18 @@ func (table *ResultsTable) tableInputCapture(event *tcell.EventKey) *tcell.Event
 		go table.Select(rowCount-1, selectedColumnIndex)
 	} else if eventKey == 4 { // Ctrl + D
 		if selectedRowIndex+7 > rowCount-1 {
+			if table.tryStridePaginate(1, selectedColumnIndex) {
+				return nil
+			}
 			go table.Select(rowCount-1, selectedColumnIndex)
 		} else {
 			go table.Select(selectedRowIndex+7, selectedColumnIndex)
 		}
 	} else if eventKey == 21 { // Ctrl + U
 		if selectedRowIndex-7 < 1 {
+			if table.tryStridePaginate(-1, selectedColumnIndex) {
+				return nil
+			}
 			go table.Select(1, selectedColumnIndex)
 		} else {
 			go table.Select(selectedRowIndex-7, selectedColumnIndex)
@@ -650,6 +656,48 @@ func (table *ResultsTable) tryAutoPaginate(direction, selectedRowIndex, selected
 
 			targetCol := min(selectedColumnIndex, table.GetColumnCount()-1)
 			table.Select(max(len(rows)-1, 1), max(targetCol, 0))
+		})
+		return true
+	default:
+		return false
+	}
+}
+
+func (table *ResultsTable) tryStridePaginate(direction, selectedColumnIndex int) bool {
+	if table.Menu == nil || table.Menu.GetSelectedOption() != 1 {
+		return false
+	}
+	if table.GetIsLoading() || table.GetIsEditing() || table.GetIsFiltering() {
+		return false
+	}
+
+	switch direction {
+	case 1:
+		if table.Pagination.GetIsLastPage() {
+			return false
+		}
+		table.Pagination.SetOffset(table.Pagination.GetOffset() + table.Pagination.GetLimit())
+		table.FetchRecordsAsync(nil, func(rows [][]string) {
+			if len(rows) <= 1 {
+				return
+			}
+			targetCol := min(selectedColumnIndex, table.GetColumnCount()-1)
+			targetRow := min(7, len(rows)-1)
+			table.Select(max(targetRow, 1), max(targetCol, 0))
+		})
+		return true
+	case -1:
+		if table.Pagination.GetIsFirstPage() {
+			return false
+		}
+		table.Pagination.SetOffset(table.Pagination.GetOffset() - table.Pagination.GetLimit())
+		table.FetchRecordsAsync(nil, func(rows [][]string) {
+			if len(rows) <= 1 {
+				return
+			}
+			targetCol := min(selectedColumnIndex, table.GetColumnCount()-1)
+			targetRow := max(len(rows)-7, 1)
+			table.Select(targetRow, max(targetCol, 0))
 		})
 		return true
 	default:

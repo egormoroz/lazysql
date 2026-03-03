@@ -90,6 +90,7 @@ func NewQueryHistoryModal(connectionIdentifier string, onSelect func(query strin
 			return nil
 		case commands.Quit:
 			if !qhm.queryHistoryComponent.GetIsFiltering() && !qhm.savedQueriesComponent.GetIsFiltering() {
+				app.App.ClearQuitAttempt()
 				mainPages.RemovePage(pageNameQueryHistory)
 				return nil
 			}

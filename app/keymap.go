@@ -64,6 +64,7 @@ var Keymaps = KeymapSystem{
 			Bind{Key: Key{Code: tcell.KeyCtrlE}, Cmd: cmd.SwitchToEditorView, Description: "Open SQL editor"},
 			Bind{Key: Key{Code: tcell.KeyCtrlS}, Cmd: cmd.Save, Description: "Execute pending changes"},
 			Bind{Key: Key{Char: 'q'}, Cmd: cmd.Quit, Description: "Quit"},
+			Bind{Key: Key{Code: tcell.KeyCtrlW}, Cmd: cmd.Quit, Description: "Quit immediately"},
 			Bind{Key: Key{Code: tcell.KeyBackspace2}, Cmd: cmd.SwitchToConnectionsView, Description: "Switch to connections list"},
 			Bind{Key: Key{Char: '?'}, Cmd: cmd.HelpPopup, Description: "Help"},
 			Bind{Key: Key{Code: tcell.KeyCtrlP}, Cmd: cmd.SearchGlobal, Description: "Global search"},
@@ -77,6 +78,7 @@ var Keymaps = KeymapSystem{
 			Bind{Key: Key{Char: 'e'}, Cmd: cmd.EditConnection, Description: "Edit a database connection"},
 			Bind{Key: Key{Char: 'd'}, Cmd: cmd.DeleteConnection, Description: "Delete a database connection"},
 			Bind{Key: Key{Char: 'q'}, Cmd: cmd.Quit, Description: "Quit"},
+			Bind{Key: Key{Code: tcell.KeyCtrlW}, Cmd: cmd.Quit, Description: "Quit immediately"},
 		},
 		TreeGroup: {
 			Bind{Key: Key{Char: 'g'}, Cmd: cmd.GotoTop, Description: "Go to top"},
@@ -176,6 +178,7 @@ var Keymaps = KeymapSystem{
 		JSONViewerGroup: {
 			Bind{Key: Key{Char: 'Z'}, Cmd: cmd.ShowRowJSONViewer, Description: "Toggle JSON viewer"},
 			Bind{Key: Key{Char: 'z'}, Cmd: cmd.ShowCellJSONViewer, Description: "Toggle JSON viewer"},
+			Bind{Key: Key{Char: 'q'}, Cmd: cmd.Quit, Description: "Close JSON viewer"},
 			Bind{Key: Key{Char: 'y'}, Cmd: cmd.Copy, Description: "Copy value to clipboard"},
 			Bind{Key: Key{Char: 'w'}, Cmd: cmd.ToggleJSONViewerWrap, Description: "Toggle word wrap"},
 		},

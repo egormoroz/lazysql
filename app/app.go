@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -25,6 +26,8 @@ type Application struct {
 	context   context.Context
 	cancelFn  context.CancelFunc
 	waitGroup sync.WaitGroup
+	quitMu    sync.Mutex
+	lastQuit  time.Time
 }
 
 type Theme struct {
@@ -110,6 +113,41 @@ func (a *Application) Stop() {
 	a.cancelFn()
 	a.waitGroup.Wait()
 	a.Application.Stop()
+}
+
+// RegisterQuitAttempt marks the current time as the latest quit key press.
+func (a *Application) RegisterQuitAttempt() {
+	a.quitMu.Lock()
+	a.lastQuit = time.Now()
+	a.quitMu.Unlock()
+}
+
+// ClearQuitAttempt clears any pending quit key press sequence.
+func (a *Application) ClearQuitAttempt() {
+	a.quitMu.Lock()
+	a.lastQuit = time.Time{}
+	a.quitMu.Unlock()
+}
+
+// ShouldQuit returns true when the app should quit for this quit key event.
+// Ctrl+W always quits immediately. For other quit keys, quitting requires a
+// second press within a short timeout.
+func (a *Application) ShouldQuit(event *tcell.EventKey) bool {
+	if event != nil && event.Key() == tcell.KeyCtrlW {
+		return true
+	}
+
+	a.quitMu.Lock()
+	defer a.quitMu.Unlock()
+
+	now := time.Now()
+	if now.Sub(a.lastQuit) <= 1200*time.Millisecond {
+		a.lastQuit = time.Time{}
+		return true
+	}
+
+	a.lastQuit = now
+	return false
 }
 
 // register listens for interrupt and termination signals to

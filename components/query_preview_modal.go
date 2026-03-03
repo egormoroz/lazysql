@@ -78,6 +78,7 @@ func NewQueryPreviewModal(queries *[]models.DBDMLChange, dbdriver drivers.Driver
 		command := app.Keymaps.Group(app.QueryPreviewGroup).Resolve(event)
 
 		if command == commands.Quit || event.Key() == tcell.KeyEsc {
+			app.App.ClearQuitAttempt()
 			mainPages.RemovePage(pageNameDMLPreview)
 		} else if command == commands.Save {
 			confirmationModal := NewConfirmationModal("Are you sure you want to save the queries?")

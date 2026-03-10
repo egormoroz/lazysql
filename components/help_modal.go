@@ -23,6 +23,7 @@ type HelpModal struct {
 	Wrapper       *tview.Flex
 	KeybindGroups []KeybindGroup
 	LongestKey    string
+	rowToBind map[int]keymap.Bind
 }
 
 func NewHelpModal() *HelpModal {
@@ -94,6 +95,23 @@ func NewHelpModal() *HelpModal {
 			modal.showSearchBar(false)
 			mainPages.RemovePage(pageNameHelp)
 		}
+
+		if event.Key() == tcell.KeyEnter {
+			row, _ := modal.Table.GetSelection()
+			if bind, ok := modal.rowToBind[row]; ok {
+				modal.showSearchBar(false)
+				mainPages.RemovePage(pageNameHelp)
+				var synthEvent *tcell.EventKey
+				if bind.Key.Char != 0 {
+					synthEvent = tcell.NewEventKey(tcell.KeyRune, bind.Key.Char, tcell.ModNone)
+				} else {
+					synthEvent = tcell.NewEventKey(bind.Key.Code, 0, tcell.ModNone)
+				}
+				app.App.QueueEvent(synthEvent)
+				return nil
+			}
+		}
+
 		return event
 	})
 
@@ -121,6 +139,7 @@ func (modal *HelpModal) showSearchBar(show bool) {
 
 func (modal *HelpModal) fillTable(filter string) {
 	modal.Table.Clear()
+	modal.rowToBind = make(map[int]keymap.Bind)
 
 	var filtered []KeybindGroup
 
@@ -152,14 +171,16 @@ func (modal *HelpModal) fillTable(filter string) {
 		modal.Table.SetCell(rowCount+1, 0, groupNameCell)
 		modal.Table.SetCell(rowCount+2, 0, tview.NewTableCell("").SetSelectable(false))
 
-		for i, key := range group.Binds {
-			keyText := key.Key.String()
+		for i, bind := range group.Binds {
+			keyText := bind.Key.String()
 
 			if len(keyText) < len(modal.LongestKey) {
 				keyText = strings.Repeat(" ", len(modal.LongestKey)-len(keyText)) + keyText
 			}
-			modal.Table.SetCell(rowCount+3+i, 0, tview.NewTableCell(keyText).SetAlign(tview.AlignRight).SetTextColor(app.Styles.SecondaryTextColor))
-			modal.Table.SetCell(rowCount+3+i, 1, tview.NewTableCell(key.Description).SetAlign(tview.AlignLeft).SetExpansion(1))
+			row := rowCount + 3 + i
+			modal.Table.SetCell(row, 0, tview.NewTableCell(keyText).SetAlign(tview.AlignRight).SetTextColor(app.Styles.SecondaryTextColor))
+			modal.Table.SetCell(row, 1, tview.NewTableCell(bind.Description).SetAlign(tview.AlignLeft).SetExpansion(1))
+			modal.rowToBind[row] = bind
 		}
 
 	}

@@ -722,10 +722,7 @@ func (db *MSSQL) getTableInformation(query, database, table, schema string) ([][
 
 func (db *MSSQL) FormatArg(arg any, colType models.CellValueType) any {
 	if colType == models.Null {
-		return sql.NullString{
-			String: "",
-			Valid:  false,
-		}
+		return nil
 	}
 
 	if colType == models.Default {

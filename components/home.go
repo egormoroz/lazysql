@@ -312,6 +312,17 @@ func (home *Home) isCurrentTabFiltering() bool {
 	return false
 }
 
+func (home *Home) isCurrentTabEditing() bool {
+	tab := home.TabbedPane.GetCurrentTab()
+
+	if tab != nil {
+		table := tab.Content.(*ResultsTable)
+		return table.GetIsEditing()
+	}
+
+	return false
+}
+
 func (home *Home) rightWrapperInputCapture(event *tcell.EventKey) *tcell.EventKey {
 	var tab *Tab
 
@@ -347,20 +358,26 @@ func (home *Home) rightWrapperInputCapture(event *tcell.EventKey) *tcell.EventKe
 
 		return event
 	case commands.TabFirst:
-		if home.isCurrentTabFiltering() {
-			return event
+		tab := home.TabbedPane.GetCurrentTab()
+		if tab != nil {
+			table := tab.Content.(*ResultsTable)
+			if table.GetIsEditing() || table.GetIsFiltering() {
+				return event
+			}
 		}
 
 		home.TabbedPane.SwitchToFirstTab()
-		// home.focusTab(home.TabbedPane.SwitchToFirstTab())
 		return nil
 	case commands.TabLast:
-		if home.isCurrentTabFiltering() {
-			return event
+		tab := home.TabbedPane.GetCurrentTab()
+		if tab != nil {
+			table := tab.Content.(*ResultsTable)
+			if table.GetIsEditing() || table.GetIsFiltering() {
+				return event
+			}
 		}
 
 		home.TabbedPane.SwitchToLastTab()
-		// home.focusTab(home.TabbedPane.SwitchToLastTab())
 		return nil
 	case commands.TabClose:
 		tab = home.TabbedPane.GetCurrentTab()
@@ -378,7 +395,7 @@ func (home *Home) rightWrapperInputCapture(event *tcell.EventKey) *tcell.EventKe
 			}
 		}
 	case commands.PagePrev:
-		if home.isCurrentTabFiltering() {
+		if home.isCurrentTabEditing() || home.isCurrentTabFiltering() {
 			return event
 		}
 
@@ -408,7 +425,7 @@ func (home *Home) rightWrapperInputCapture(event *tcell.EventKey) *tcell.EventKe
 		}
 
 	case commands.PageNext:
-		if home.isCurrentTabFiltering() {
+		if home.isCurrentTabEditing() || home.isCurrentTabFiltering() {
 			return event
 		}
 
@@ -508,6 +525,8 @@ func (home *Home) homeInputCapture(event *tcell.EventKey) *tcell.EventKey {
 				home.ListOfDBChanges = []models.DBDMLChange{}
 				table.FetchRecordsAsync(nil, nil)
 				home.Tree.ForceRemoveHighlight()
+			}, func(deleted models.DBDMLChange) {
+				table.RevertChange(deleted)
 			})
 
 			mainPages.AddPage(pageNameDMLPreview, queryPreviewModal, true, true)

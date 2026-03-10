@@ -543,10 +543,7 @@ func (db *MySQL) formatTableName(database, table string) string {
 
 func (db *MySQL) FormatArg(arg any, colType models.CellValueType) any {
 	if colType == models.Null {
-		return sql.NullString{
-			String: "",
-			Valid:  false,
-		}
+		return nil
 	}
 
 	if colType == models.Default {

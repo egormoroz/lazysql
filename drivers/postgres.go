@@ -910,10 +910,7 @@ func (db *Postgres) formatTableName(table string) (string, error) {
 
 func (db *Postgres) FormatArg(arg any, colType models.CellValueType) any {
 	if colType == models.Null {
-		return sql.NullString{
-			String: "",
-			Valid:  false,
-		}
+		return nil
 	}
 
 	if colType == models.Empty {

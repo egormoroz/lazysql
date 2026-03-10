@@ -23,7 +23,7 @@ type QueryPreviewModal struct {
 	Error    *tview.Modal
 }
 
-func NewQueryPreviewModal(queries *[]models.DBDMLChange, dbdriver drivers.Driver, onFinish func()) *QueryPreviewModal {
+func NewQueryPreviewModal(queries *[]models.DBDMLChange, dbdriver drivers.Driver, onFinish func(), onChangeDeleted func(change models.DBDMLChange)) *QueryPreviewModal {
 	modal := func(p tview.Primitive) tview.Primitive {
 		return tview.NewFlex().
 			AddItem(nil, 0, 1, false).
@@ -84,6 +84,8 @@ func NewQueryPreviewModal(queries *[]models.DBDMLChange, dbdriver drivers.Driver
 			confirmationModal := NewConfirmationModal("Are you sure you want to save the queries?")
 
 			confirmationModal.SetDoneFunc(func(_ int, buttonLabel string) {
+				mainPages.RemovePage(pageNameConfirmation)
+
 				if buttonLabel == "Yes" {
 					err := dbdriver.ExecutePendingChanges(*queries)
 					if err != nil {
@@ -91,11 +93,11 @@ func NewQueryPreviewModal(queries *[]models.DBDMLChange, dbdriver drivers.Driver
 						return
 					}
 
+					mainPages.RemovePage(pageNameDMLPreview)
 					onFinish()
+				} else {
+					mainPages.RemovePage(pageNameDMLPreview)
 				}
-
-				mainPages.RemovePage(pageNameConfirmation)
-				mainPages.RemovePage(pageNameDMLPreview)
 			})
 
 			mainPages.AddPage(pageNameConfirmation, confirmationModal, true, true)
@@ -118,9 +120,16 @@ func NewQueryPreviewModal(queries *[]models.DBDMLChange, dbdriver drivers.Driver
 
 			confirmationModal.SetDoneFunc(func(_ int, buttonLabel string) {
 				if buttonLabel == "Yes" {
+					deleted := (*queries)[row]
 					*queries = slices.Delete((*queries), row, row+1)
 					table.Clear()
 					r.populateTable()
+					if onChangeDeleted != nil {
+						onChangeDeleted(deleted)
+					}
+					if len(*queries) == 0 {
+						mainPages.RemovePage(pageNameDMLPreview)
+					}
 				}
 
 				mainPages.RemovePage(pageNameConfirmation)

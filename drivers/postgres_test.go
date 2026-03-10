@@ -543,6 +543,46 @@ func TestPostgres_ExecutePendingChanges(t *testing.T) {
 	}
 }
 
+func TestPostgres_ExecutePendingChanges_SetNull(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("Error creating mock: %v", err)
+	}
+	defer db.Close()
+
+	pg := &Postgres{Connection: db, CurrentDatabase: DBNamePostgres}
+
+	changes := []models.DBDMLChange{
+		{
+			Table: schemaAndTablePostgres,
+			Type:  models.DMLUpdateType,
+			Values: []models.CellValue{
+				{Column: "archived_at", Value: "NULL", Type: models.Null},
+			},
+			PrimaryKeyInfo: []models.PrimaryKeyInfo{
+				{Name: "id", Value: "6"},
+			},
+		},
+	}
+
+	// NULL should be inlined in the query, not passed as a placeholder arg.
+	// The only placeholder should be for the WHERE clause.
+	mock.ExpectBegin()
+	mock.ExpectExec(fmt.Sprintf(`UPDATE "%s"."%s" SET "archived_at" = NULL WHERE "id" = \$1`, schemaPostgres, tableNamePostgres)).
+		WithArgs("6").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	err = pg.ExecutePendingChanges(changes)
+	if err != nil {
+		t.Fatalf("ExecutePendingChanges with NULL failed: %v", err)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("Unfulfilled expectations: %s", err)
+	}
+}
+
 func TestPostgres_GetPrimaryKeyColumnNames(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

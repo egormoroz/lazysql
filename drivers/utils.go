@@ -55,13 +55,16 @@ func buildInsertQuery(formattedTableName string, values []models.CellValue, driv
 	index := 1
 
 	for _, value := range values {
-		if value.Type != models.Default {
-			cols = append(cols, driver.FormatReference(value.Column))
-		}
+		cols = append(cols, driver.FormatReference(value.Column))
 
-		if value.Value != nil && value.Type != models.Default {
+		switch value.Type {
+		case models.Null:
+			placeholders = append(placeholders, "NULL")
+		case models.Default:
+			placeholders = append(placeholders, "DEFAULT")
+		default:
 			placeholders = append(placeholders, driver.FormatPlaceholder(index))
-			args = append(args, value.Value)
+			args = append(args, driver.FormatArg(value.Value, value.Type))
 			index++
 		}
 	}
@@ -121,7 +124,7 @@ func buildUpdateQuery(sanitizedTableName string, values []models.CellValue, prim
 	argsWithoutDefaults := []models.CellValue{}
 
 	for _, arg := range values {
-		if arg.Type != models.Default {
+		if arg.Type != models.Default && arg.Type != models.Null {
 			argsWithoutDefaults = append(argsWithoutDefaults, arg)
 		}
 	}
@@ -172,7 +175,7 @@ func buildUpdateQuery(sanitizedTableName string, values []models.CellValue, prim
 		sanitizedArgs = append(sanitizedArgs, sanitizedPki.Value)
 	}
 
-	logger.Info("buildUpdateQueryString", map[string]any{"queryStr": queryStr, "sanitizedArgs": sanitizedArgs})
+	logger.Info("buildUpdateQuery", map[string]any{"queryStr": queryStr, "sanitizedArgs": sanitizedArgs})
 
 	newQuery := models.Query{
 		Query: queryStr,
@@ -271,13 +274,10 @@ func buildPlaceholders(values []models.CellValue, driver Driver) []string {
 
 	for _, cell := range values {
 		switch cell.Type {
-		// case models.Empty:
-		// placeholders = append(placeholders, "")
-		// case models.Null:
-		// 	placeholders = append(placeholders, "NULL")
+		case models.Null:
+			placeholders = append(placeholders, "NULL")
 		case models.Default:
 			placeholders = append(placeholders, "DEFAULT")
-			index--
 		default:
 			placeholders = append(placeholders, driver.FormatPlaceholder(index))
 			index++

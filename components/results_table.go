@@ -297,6 +297,7 @@ func (table *ResultsTable) AddRows(rows [][]string) {
 
 			tableCell.SetSelectable(i > 0)
 			tableCell.SetExpansion(1)
+			tableCell.SetMaxWidth(50)
 
 			table.SetCell(i, j, tableCell)
 		}
@@ -329,6 +330,7 @@ func (table *ResultsTable) AddInsertedRows() {
 		for j, cell := range row {
 			tableCell := tview.NewTableCell(cell.Value.(string))
 			tableCell.SetExpansion(1)
+			tableCell.SetMaxWidth(50)
 			tableCell.SetReference(inserts[i].PrimaryKeyInfo[0].Value)
 
 			tableCell.SetTextColor(app.Styles.PrimaryTextColor)
@@ -343,6 +345,7 @@ func (table *ResultsTable) AppendNewRow(cells []models.CellValue, index int, UUI
 	for i, cell := range cells {
 		tableCell := tview.NewTableCell(cell.Value.(string))
 		tableCell.SetExpansion(1)
+		tableCell.SetMaxWidth(50)
 		// Appended rows have a reference to the row UUID so we can identify them later
 		// Also, rows that have columns marked to be UPDATED will have a reference to the type of the new value (NULL, EMPTY, DEFAULT)
 		// So, the cell reference will be used to determine if the row/column is an inserted row or if it's an UPDATED row
@@ -527,7 +530,7 @@ func (table *ResultsTable) tableInputCapture(event *tcell.EventKey) *tcell.Event
 				table.FinishSettingValue()
 
 				if selection >= 0 {
-					err := table.AppendNewChange(models.DMLUpdateType, selectedRowIndex, selectedColumnIndex, models.CellValue{Type: selection, Value: value, Column: table.GetColumnNameByIndex(selectedColumnIndex)})
+					err := table.AppendNewChange(models.DMLUpdateType, selectedRowIndex, selectedColumnIndex, models.CellValue{Type: selection, Value: value, Column: table.GetColumnNameByIndex(selectedColumnIndex), TableColumnIndex: selectedColumnIndex, TableRowIndex: selectedRowIndex})
 					if err != nil {
 						table.SetError(err.Error(), nil)
 					}
@@ -1130,6 +1133,7 @@ func (table *ResultsTable) SetSortedBy(column string, direction string) {
 				tableCell := tview.NewTableCell(col[0])
 				tableCell.SetSelectable(false)
 				tableCell.SetExpansion(1)
+				tableCell.SetMaxWidth(50)
 				tableCell.SetTextColor(app.Styles.PrimaryTextColor)
 
 				if col[0] == column {
@@ -1498,8 +1502,6 @@ func (table *ResultsTable) MutateInsertedRowCell(rowID string, newValue models.C
 }
 
 func (table *ResultsTable) AppendNewChange(changeType models.DMLType, rowIndex int, colIndex int, value models.CellValue) error {
-	// case models.Empty:
-	// placeholders = append(placeholders, "")
 	databaseName := table.GetDatabaseName()
 	tableName := table.GetTableName()
 
@@ -1630,6 +1632,48 @@ func (table *ResultsTable) SetRowColor(rowIndex int, color tcell.Color) {
 
 func (table *ResultsTable) SetCellColor(rowIndex int, colIndex int, color tcell.Color) {
 	table.GetCell(rowIndex, colIndex).SetBackgroundColor(color)
+}
+
+func (table *ResultsTable) RevertChange(change models.DBDMLChange) {
+	records := table.GetRecords()
+
+	switch change.Type {
+	case models.DMLUpdateType:
+		for _, value := range change.Values {
+			rowIdx := value.TableRowIndex
+			colIdx := value.TableColumnIndex
+			if rowIdx > 0 && rowIdx < len(records) && colIdx >= 0 && colIdx < len(records[rowIdx]) {
+				originalValue := records[rowIdx][colIdx]
+				cell := table.GetCell(rowIdx, colIdx)
+				cell.SetText(originalValue)
+				cell.SetBackgroundColor(app.Styles.PrimitiveBackgroundColor)
+				cell.SetStyle(tcell.StyleDefault)
+
+				if originalValue == "EMPTY&" || originalValue == "NULL&" || originalValue == "DEFAULT&" {
+					cell.SetText(strings.Replace(originalValue, "&", "", 1))
+					cell.SetStyle(table.GetItalicStyle())
+					cell.SetReference(originalValue)
+				} else {
+					cell.SetReference(nil)
+				}
+			}
+		}
+	case models.DMLDeleteType:
+		for _, value := range change.Values {
+			table.SetRowColor(value.TableRowIndex, app.Styles.PrimitiveBackgroundColor)
+		}
+	case models.DMLInsertType:
+		if len(change.PrimaryKeyInfo) > 0 {
+			rowID := change.PrimaryKeyInfo[0].Value
+			for row := table.GetRowCount() - 1; row >= 1; row-- {
+				ref := table.GetCell(row, 0).GetReference()
+				if ref != nil && ref == rowID {
+					table.RemoveRow(row)
+					break
+				}
+			}
+		}
+	}
 }
 
 func (table *ResultsTable) appendNewRow() {

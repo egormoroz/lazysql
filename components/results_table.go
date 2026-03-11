@@ -283,10 +283,23 @@ func (table *ResultsTable) subscribeToSidebarChanges() {
 	}
 }
 
+const maxCellDisplayLen = 256
+
+func truncateDisplayText(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "…"
+}
+
 func (table *ResultsTable) AddRows(rows [][]string) {
 	for i, row := range rows {
 		for j, cell := range row {
-			tableCell := tview.NewTableCell(cell)
+			displayText := cell
+			if i > 0 { // Don't truncate header row
+				displayText = truncateDisplayText(cell, maxCellDisplayLen)
+			}
+			tableCell := tview.NewTableCell(displayText)
 			tableCell.SetTextColor(app.Styles.PrimaryTextColor)
 
 			if cell == "EMPTY&" || cell == "NULL&" || cell == "DEFAULT&" {
@@ -302,6 +315,26 @@ func (table *ResultsTable) AddRows(rows [][]string) {
 			table.SetCell(i, j, tableCell)
 		}
 	}
+}
+
+// GetFullCellText returns the full (non-truncated) text for a data cell.
+// It reads from state.records which holds the original DB values.
+func (table *ResultsTable) GetFullCellText(row, col int) string {
+	records := table.state.records
+	if row >= 0 && row < len(records) && col >= 0 && col < len(records[row]) {
+		text := records[row][col]
+		// Strip the special marker suffix used for EMPTY&, NULL&, DEFAULT&
+		if text == "EMPTY&" || text == "NULL&" || text == "DEFAULT&" {
+			return strings.Replace(text, "&", "", 1)
+		}
+		return text
+	}
+	// Fallback to cell text (e.g., for inserted rows not in records)
+	cell := table.GetCell(row, col)
+	if cell != nil {
+		return cell.Text
+	}
+	return ""
 }
 
 func (table *ResultsTable) AddInsertedRows() {
@@ -554,10 +587,10 @@ func (table *ResultsTable) tableInputCapture(event *tcell.EventKey) *tcell.Event
 		table.handleShowJSONViewer(commands.ShowCellJSONViewer)
 		return nil
 	} else if command == commands.Copy {
-		selectedCell := table.GetCell(selectedRowIndex, selectedColumnIndex)
-		if selectedCell != nil {
+		fullText := table.GetFullCellText(selectedRowIndex, selectedColumnIndex)
+		if fullText != "" {
 			clipboard := lib.NewClipboard()
-			err := clipboard.Write(selectedCell.Text)
+			err := clipboard.Write(fullText)
 			if err != nil {
 				table.SetError(err.Error(), nil)
 			}
@@ -1373,17 +1406,18 @@ func (table *ResultsTable) StartEditingCell(row int, col int, callback func(newV
 	table.SetInputCapture(nil)
 
 	cell := table.GetCell(row, col)
+	fullText := table.GetFullCellText(row, col)
 	inputField := tview.NewInputField()
-	inputField.SetText(cell.Text)
+	inputField.SetText(fullText)
 	inputField.SetFieldBackgroundColor(app.Styles.PrimaryTextColor)
 	inputField.SetFieldTextColor(app.Styles.PrimitiveBackgroundColor)
 	inputField.SetBorder(true)
 
-	initialText := cell.Text
+	initialText := fullText
 
 	inputField.SetDoneFunc(func(key tcell.Key) {
 		table.SetIsEditing(false)
-		currentValue := cell.Text
+		currentValue := fullText
 		newValue := inputField.GetText()
 		columnName := table.GetCell(0, col).Text
 
@@ -1394,7 +1428,11 @@ func (table *ResultsTable) StartEditingCell(row int, col int, callback func(newV
 		var appendErr error
 
 		if key != tcell.KeyEscape {
-			cell.SetText(newValue)
+			cell.SetText(truncateDisplayText(newValue, maxCellDisplayLen))
+			// Keep records in sync with full text
+			if row < len(table.state.records) && col < len(table.state.records[row]) {
+				table.state.records[row][col] = newValue
+			}
 
 			if currentValue != newValue {
 				appendErr = table.AppendNewChange(models.DMLUpdateType, row, col, models.CellValue{Type: models.String, Value: newValue, Column: columnName, TableColumnIndex: col, TableRowIndex: row})
@@ -1425,7 +1463,11 @@ func (table *ResultsTable) StartEditingCell(row int, col int, callback func(newV
 
 		if key == tcell.KeyEnter || key == tcell.KeyEscape {
 			if appendErr != nil {
-				cell.Text = initialText
+				cell.Text = truncateDisplayText(initialText, maxCellDisplayLen)
+				// Restore records too
+				if row < len(table.state.records) && col < len(table.state.records[row]) {
+					table.state.records[row][col] = initialText
+				}
 			}
 
 			table.SetInputCapture(table.tableInputCapture)
@@ -1466,12 +1508,12 @@ func (table *ResultsTable) handleShowJSONViewer(command commands.Command) {
 	if command == commands.ShowRowJSONViewer {
 		for i := 0; i < table.GetColumnCount(); i++ {
 			columnName := table.GetColumnNameByIndex(i)
-			cellValue := table.GetCell(selectedRow, i).Text
+			cellValue := table.GetFullCellText(selectedRow, i)
 			rowData[columnName] = cellValue
 		}
 	} else if command == commands.ShowCellJSONViewer {
 		columnName := table.GetColumnNameByIndex(selectedCol)
-		cellValue := table.GetCell(selectedRow, selectedCol).Text
+		cellValue := table.GetFullCellText(selectedRow, selectedCol)
 		rowData[columnName] = cellValue
 	}
 
@@ -1716,8 +1758,8 @@ func (table *ResultsTable) duplicateRow() {
 
 	for i, column := range dbColumns {
 		if i != 0 { // Skip the first row because they are the column names (e.x "Field", "Type", "Null", "Key", "Default", "Extra")
-			origCell := table.GetCell(row, i-1)
-			newRow[i-1] = models.CellValue{Type: models.String, Column: column[0], Value: origCell.Text, TableRowIndex: newRowTableIndex, TableColumnIndex: i}
+			fullText := table.GetFullCellText(row, i-1)
+			newRow[i-1] = models.CellValue{Type: models.String, Column: column[0], Value: fullText, TableRowIndex: newRowTableIndex, TableColumnIndex: i}
 		}
 	}
 
@@ -1889,7 +1931,7 @@ func (table *ResultsTable) UpdateSidebar() {
 
 			sidebarWidth := table.getSidebarWidth()
 
-			text := table.GetCell(selectedRow, i-1).Text
+			text := table.GetFullCellText(selectedRow, i-1)
 			title := name
 
 			repeatCount := sidebarWidth - len(name) - len(colType) - 4 // idk why 4 is needed, but it works.

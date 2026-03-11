@@ -1031,6 +1031,7 @@ func (table *ResultsTable) GetPrimaryKeySort() string {
 func (table *ResultsTable) SetRecords(rows [][]string) {
 	table.state.records = rows
 	table.UpdateRows(rows)
+	table.restoreSortIcon()
 	table.colorChangedCells()
 }
 
@@ -1180,6 +1181,35 @@ func (table *ResultsTable) SetSortedBy(column string, direction string) {
 		table.Select(previousRow, previousColumn)
 		App.ForceDraw()
 	})
+}
+
+func (table *ResultsTable) restoreSortIcon() {
+	sort := table.GetCurrentSort()
+	if sort == "" {
+		return
+	}
+
+	parts := strings.SplitN(sort, " ", 2)
+	if len(parts) < 2 {
+		return
+	}
+	column, direction := parts[0], parts[1]
+
+	iconDirection := "▲"
+	if direction == "DESC" {
+		iconDirection = "▼"
+	}
+
+	columns := table.GetColumns()
+	for i, col := range columns {
+		if i > 0 && col[0] == column {
+			cell := table.GetCell(0, i-1)
+			if cell != nil {
+				cell.SetText(fmt.Sprintf("%s %s", col[0], iconDirection))
+			}
+			break
+		}
+	}
 }
 
 func (table *ResultsTable) limitRecordsForPagination(records [][]string) ([][]string, bool) {

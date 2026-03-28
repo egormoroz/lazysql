@@ -286,6 +286,7 @@ func (table *ResultsTable) subscribeToSidebarChanges() {
 const maxCellDisplayLen = 256
 
 func truncateDisplayText(s string, maxLen int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
 	if len(s) <= maxLen {
 		return s
 	}

@@ -5,16 +5,18 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 )
 
 type logger struct {
-	mu     sync.Mutex
-	file   *os.File
-	level  slog.Level
-	output string
+	mu            sync.Mutex
+	file          *os.File
+	errorFile     *os.File
+	level         slog.Level
+	output        string
 }
 
 type logMessage struct {
@@ -27,11 +29,48 @@ type logMessage struct {
 var logInstance *logger
 
 func init() {
-	logInstance = &logger{level: slog.LevelInfo}
+	l := &logger{level: slog.LevelInfo}
+	l.errorFile = openDefaultErrorFile()
+	logInstance = l
+}
+
+// openDefaultErrorFile opens ~/.config/lazysql/errors.log, creating the
+// directory if needed. Returns nil on failure (errors are silently ignored
+// since we have no safe output channel in a TUI).
+func openDefaultErrorFile() *os.File {
+	configDir := os.Getenv("XDG_CONFIG_HOME")
+	if configDir == "" {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return nil
+		}
+		configDir = dir
+	}
+	dir := filepath.Join(configDir, "lazysql")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "errors.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY|os.O_SYNC, 0644)
+	if err != nil {
+		return nil
+	}
+	return f
+}
+
+func (l *logger) writeToFile(f *os.File, data []byte) {
+	if f == nil {
+		return
+	}
+	_, _ = f.Write(data)
+	_, _ = f.Write([]byte("\n"))
 }
 
 func (l *logger) log(level slog.Level, msg string, data map[string]any) {
-	if level < l.level {
+	if level < l.level && l.file != nil {
+		return
+	}
+	// Errors are always logged regardless of configured level.
+	if level < l.level && level < slog.LevelError {
 		return
 	}
 
@@ -51,19 +90,12 @@ func (l *logger) log(level slog.Level, msg string, data map[string]any) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if l.file == nil {
-		// maybe add another way to log, I did not want to add fmt.Println since this is a TUI app
-		return
-	}
-
-	_, err = l.file.Write(logData)
-	if err != nil {
-		return
-	}
-
-	_, err = l.file.Write([]byte("\n"))
-	if err != nil {
-		return
+	if l.file != nil {
+		// Explicit logfile: everything goes here.
+		l.writeToFile(l.file, logData)
+	} else if level >= slog.LevelError {
+		// No explicit logfile: errors always go to the default error log.
+		l.writeToFile(l.errorFile, logData)
 	}
 }
 

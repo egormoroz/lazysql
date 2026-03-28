@@ -831,6 +831,7 @@ func (tree *Tree) InitializeNodes(dbName string) {
 		rootNode.AddChild(childNode)
 
 		go func(database string, node *tview.TreeNode) {
+			defer logger.Recover("tree.GetTables")
 			tables, err := tree.DBDriver.GetTables(database)
 			if err != nil {
 				logger.Error(err.Error(), nil)

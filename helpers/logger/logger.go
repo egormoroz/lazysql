@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -149,6 +150,20 @@ func Warn(msg string, data map[string]any) {
 
 func Error(msg string, data map[string]any) {
 	logInstance.log(slog.LevelError, msg, data)
+}
+
+// Recover should be deferred at the top of a goroutine. It catches any panic,
+// logs it as an error with a full stack trace, then re-panics so the runtime
+// still prints the stack to stderr (visible after the TUI exits).
+func Recover(goroutine string) {
+	if r := recover(); r != nil {
+		logInstance.log(slog.LevelError, "panic in goroutine", map[string]any{
+			"goroutine": goroutine,
+			"panic":     fmt.Sprintf("%v", r),
+			"stack":     string(debug.Stack()),
+		})
+		panic(r)
+	}
 }
 
 func ParseLogLevel(s string) (slog.Level, error) {

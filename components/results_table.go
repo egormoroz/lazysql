@@ -3,6 +3,9 @@ package components
 import (
 	"cmp"
 	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -587,6 +590,9 @@ func (table *ResultsTable) tableInputCapture(event *tcell.EventKey) *tcell.Event
 	} else if command == commands.ShowCellJSONViewer {
 		table.handleShowJSONViewer(commands.ShowCellJSONViewer)
 		return nil
+	} else if event.Key() == tcell.KeyEnter && app.App.Config().EnterOpensJSONViewer {
+		table.handleShowJSONViewer(commands.ShowCellJSONViewer)
+		return nil
 	} else if command == commands.Copy {
 		fullText := table.GetFullCellText(selectedRowIndex, selectedColumnIndex)
 		if fullText != "" {
@@ -596,6 +602,41 @@ func (table *ResultsTable) tableInputCapture(event *tcell.EventKey) *tcell.Event
 				table.SetError(err.Error(), nil)
 			}
 		}
+	} else if command == commands.OpenCellInExternalEditor {
+		if table.ReadOnly {
+			table.SetError("Cannot modify data: Connection is in read-only mode", nil)
+			return nil
+		}
+		if table.Editor == nil && (runtime.GOOS == "linux" || runtime.GOOS == "darwin") {
+			selectedCell := table.GetCell(selectedRowIndex, selectedColumnIndex)
+			if selectedCell != nil {
+				originalText := selectedCell.Text
+				var newText string
+				app.App.Suspend(func() {
+					newText = openCellInExternalEditor(originalText)
+				})
+				// Strip trailing newline that editors typically add
+				newText = strings.TrimSuffix(newText, "\n")
+				if newText != originalText {
+					selectedCell.SetText(newText)
+					columnName := table.GetColumnNameByIndex(selectedColumnIndex)
+					err := table.AppendNewChange(models.DMLUpdateType, selectedRowIndex, selectedColumnIndex, models.CellValue{
+						Type:             models.String,
+						Value:            newText,
+						Column:           columnName,
+						TableColumnIndex: selectedColumnIndex,
+						TableRowIndex:    selectedRowIndex,
+					})
+					if err != nil {
+						table.SetError(err.Error(), nil)
+					}
+					if table.GetShowSidebar() {
+						table.UpdateSidebar()
+					}
+				}
+			}
+		}
+		return nil
 	} else if command == commands.ExportCSV {
 		table.showCSVExportModal()
 		return nil
@@ -1248,6 +1289,7 @@ func (table *ResultsTable) CountAllRecords() {
 	}
 
 	go func(databaseName, tableName, where string) {
+		defer logger.Recover("CountAllRecords")
 		start := time.Now()
 		totalRecords, err := table.DBDriver.CountRecords(databaseName, tableName, where)
 		errText := ""
@@ -1324,6 +1366,7 @@ func (table *ResultsTable) FetchRecordsAsync(onError func(), onDone func(rows []
 	})
 
 	go func(databaseName, tableName, where, sort string, offset, fetchLimit int, onError func(), onDone func(rows [][]string)) {
+		defer logger.Recover("FetchRecordsAsync")
 		start := time.Now()
 		records, _, executedQuery, err := table.DBDriver.GetRecords(databaseName, tableName, where, sort, offset, fetchLimit)
 		errText := ""
@@ -1415,6 +1458,11 @@ func (table *ResultsTable) FetchRecordsAsync(onError func(), onDone func(rows []
 			table.SetIndexes(indexes)
 			table.SetPrimaryKeyColumnNames(primaryKeyColumnNames)
 			table.Select(1, 0)
+
+			if len(primaryKeyColumnNames) == 0 {
+				currentText := table.Pagination.textView.GetText(false)
+				table.Pagination.textView.SetText(currentText + " ⚠ No Primary Key")
+			}
 
 			logger.Debug("FetchRecords: completed", map[string]any{
 				"database":   databaseName,
@@ -1685,6 +1733,16 @@ func (table *ResultsTable) GetPrimaryKeyValue(rowIndex int) []models.PrimaryKeyI
 	primaryKeyColumnNames := table.GetPrimaryKeyColumnNames()
 
 	info := []models.PrimaryKeyInfo{}
+
+	if len(primaryKeyColumnNames) == 0 {
+		allRecords := table.GetRecords()
+		columns := allRecords[0]
+		row := allRecords[rowIndex]
+		for i, colName := range columns {
+			info = append(info, models.PrimaryKeyInfo{Name: colName, Value: row[i]})
+		}
+		return info
+	}
 
 	for _, primaryKeyColumnName := range primaryKeyColumnNames {
 		columnIndex := table.GetColumnIndexByName(primaryKeyColumnName)
@@ -2040,7 +2098,14 @@ func (table *ResultsTable) isAnInsertedRow(rowIndex int) (isAnInsertedRow bool, 
 }
 
 func (table *ResultsTable) colorChangedCells() {
+	tableName := table.GetTableName()
+	databaseName := table.GetDatabaseName()
+
 	for _, dmlChange := range *table.state.listOfDBChanges {
+		if dmlChange.Table != tableName || dmlChange.Database != databaseName {
+			continue
+		}
+
 		switch dmlChange.Type {
 		case models.DMLDeleteType:
 			table.SetRowColor(dmlChange.Values[0].TableRowIndex, colorTableDelete)
@@ -2190,4 +2255,62 @@ func (table *ResultsTable) showExportSuccessModal(filePath string, rowCount int)
 
 	mainPages.AddPage(pageNameCSVExportSuccess, modal, true, true)
 	App.SetFocus(modal)
+}
+
+// openCellInExternalEditor opens the user's preferred editor to edit a cell value.
+// It should be called within app.Suspend() to ensure the TUI is properly restored.
+func openCellInExternalEditor(currentText string) string {
+	tmpFile, err := os.CreateTemp("", "lazysql-cell-*.txt")
+	if err != nil {
+		logger.Error("Failed to create temporary file", map[string]any{"error": err.Error()})
+		return currentText
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.WriteString(currentText); err != nil {
+		logger.Error("Failed to write to temporary file", map[string]any{"error": err.Error()})
+		if closeErr := tmpFile.Close(); closeErr != nil {
+			logger.Error("Failed to close temporary file", map[string]any{"error": closeErr.Error()})
+		}
+		return currentText
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		logger.Error("Failed to close temporary file", map[string]any{"error": err.Error()})
+		return currentText
+	}
+
+	editorParts := getCellEditorParts()
+	editorArgs := append(editorParts[1:], tmpFile.Name())
+
+	cmd := exec.Command(editorParts[0], editorArgs...) //nolint:gosec // editor comes from trusted $EDITOR env var
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		logger.Error("Error executing editor", map[string]any{"error": err.Error(), "command": cmd.String()})
+		return currentText
+	}
+
+	updatedContent, err := os.ReadFile(tmpFile.Name())
+	if err != nil {
+		logger.Error("Failed to read from temporary file", map[string]any{"error": err.Error()})
+		return currentText
+	}
+
+	return string(updatedContent)
+}
+
+// getCellEditorParts returns the editor command and its arguments for cell editing.
+// Supports editor strings with flags like "code --wait" or "vim -u NONE".
+func getCellEditorParts() []string {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		editor = os.Getenv("VISUAL")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+	return strings.Fields(editor)
 }

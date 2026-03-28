@@ -140,6 +140,8 @@ var Keymaps = KeymapSystem{
 			// Export
 			Bind{Key: Key{Char: 'E'}, Cmd: cmd.ExportCSV, Description: "Export to CSV"},
 			Bind{Key: Key{Char: 'a'}, Cmd: cmd.CountAllRecords, Description: "Count all rows (current filter)"},
+			// External editor
+			Bind{Key: Key{Char: 'e'}, Cmd: cmd.OpenCellInExternalEditor, Description: "Edit cell in external editor"},
 		},
 		EditorGroup: {
 			Bind{Key: Key{Code: tcell.KeyCtrlR}, Cmd: cmd.Execute, Description: "Execute query"},

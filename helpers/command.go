@@ -44,6 +44,7 @@ func RunCommand(ctx context.Context, command string, timeout time.Duration, done
 	}
 
 	go func() {
+		defer logger.Recover("command.Wait")
 		if err := cmd.Wait(); err != nil {
 			logger.Error("Command stopped", map[string]any{"error": err.Error()})
 		}

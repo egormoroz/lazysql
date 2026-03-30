@@ -84,6 +84,7 @@ const (
 	DeleteConnection
 
 	// Export
+	RefreshRow
 	ExportCSV
 	CountAllRecords
 )
@@ -228,6 +229,8 @@ func (c Command) String() string {
 		return "ShowCellJSONViewer"
 	case ToggleJSONViewerWrap:
 		return "ToggleJSONViewerWrap"
+	case RefreshRow:
+		return "RefreshRow"
 	case ExportCSV:
 		return "ExportCSV"
 	case CountAllRecords:

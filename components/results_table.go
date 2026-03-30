@@ -448,6 +448,8 @@ func (table *ResultsTable) tableInputCapture(event *tcell.EventKey) *tcell.Event
 			}
 			table.Menu.SetSelectedOption(1)
 			table.FetchRecordsAsync(nil, nil)
+		case commands.RefreshRow:
+			table.RefreshRow()
 		}
 	}
 
@@ -1252,6 +1254,86 @@ func (table *ResultsTable) restoreSortIcon() {
 			break
 		}
 	}
+}
+
+func (table *ResultsTable) RefreshRow() {
+	selectedRow, selectedCol := table.GetSelection()
+	if selectedRow <= 0 {
+		return
+	}
+
+	pkColumnNames := table.GetPrimaryKeyColumnNames()
+	if len(pkColumnNames) == 0 {
+		table.SetError("Cannot refresh row: no primary key found", nil)
+		return
+	}
+
+	pkInfo := table.GetPrimaryKeyValue(selectedRow)
+	if len(pkInfo) == 0 {
+		return
+	}
+
+	// Build WHERE clause from primary key values
+	where := ""
+	for i, pk := range pkInfo {
+		ref := table.DBDriver.FormatReference(pk.Name)
+		val := table.DBDriver.FormatArgForQueryString(pk.Value)
+		if i == 0 {
+			where = fmt.Sprintf("WHERE %s = %s", ref, val)
+		} else {
+			where += fmt.Sprintf(" AND %s = %s", ref, val)
+		}
+	}
+
+	databaseName := table.GetDatabaseName()
+	tableName := table.GetTableName()
+
+	go func() {
+		records, _, _, err := table.DBDriver.GetRecords(databaseName, tableName, where, "", 0, 1)
+
+		app.App.QueueUpdateDraw(func() {
+			if err != nil {
+				table.SetError(err.Error(), nil)
+				return
+			}
+
+			// records[0] is headers, records[1] is the row data
+			if len(records) < 2 {
+				table.SetError("Row no longer exists", nil)
+				return
+			}
+
+			rowData := records[1]
+			for j, cellValue := range rowData {
+				cell := table.GetCell(selectedRow, j)
+				if cell == nil {
+					continue
+				}
+
+				displayText := truncateDisplayText(cellValue, maxCellDisplayLen)
+
+				if cellValue == "EMPTY&" || cellValue == "NULL&" || cellValue == "DEFAULT&" {
+					cell.SetText(strings.Replace(cellValue, "&", "", 1))
+					cell.SetStyle(table.GetItalicStyle())
+					cell.SetReference(cellValue)
+				} else {
+					cell.SetText(displayText)
+					cell.SetReference(nil)
+				}
+
+				// Update records in sync
+				if selectedRow < len(table.state.records) && j < len(table.state.records[selectedRow]) {
+					table.state.records[selectedRow][j] = cellValue
+				}
+			}
+
+			if table.GetShowSidebar() {
+				table.UpdateSidebar()
+			}
+
+			table.Select(selectedRow, selectedCol)
+		})
+	}()
 }
 
 func (table *ResultsTable) limitRecordsForPagination(records [][]string) ([][]string, bool) {

@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/lithammer/fuzzysearch/fuzzy"
@@ -35,6 +36,7 @@ type Tree struct {
 	FoundNodeCountInput *tview.InputField
 	subscribers         []chan models.StateChange
 	Schemas             []string
+	searchGeneration    int64
 }
 
 type TreeNodeType int
@@ -507,16 +509,23 @@ func prioritizeResult(pattern, target string, fuzzyRank int) int {
 }
 
 func (tree *Tree) search(searchText string) {
+	myGen := atomic.AddInt64(&tree.searchGeneration, 1)
+
 	rootNode := tree.GetRoot()
 	lowerSearchText := strings.ToLower(searchText)
-	tree.state.searchFoundNodes = []*tview.TreeNode{}
 
 	if lowerSearchText == "" {
-		rootNode.Walk(func(_, parent *tview.TreeNode) bool {
-			if parent != nil && parent != rootNode && parent.IsExpanded() {
-				parent.SetExpanded(false)
+		App.QueueUpdateDraw(func() {
+			if atomic.LoadInt64(&tree.searchGeneration) != myGen {
+				return
 			}
-			return true
+			tree.state.searchFoundNodes = []*tview.TreeNode{}
+			rootNode.Walk(func(_, parent *tview.TreeNode) bool {
+				if parent != nil && parent != rootNode && parent.IsExpanded() {
+					parent.SetExpanded(false)
+				}
+				return true
+			})
 		})
 		return
 	}
@@ -532,10 +541,11 @@ func (tree *Tree) search(searchText string) {
 		tableNameFilter = parts[1]
 	}
 
-	// Collect nodes with their match ranks
+	// Collect nodes with their match ranks (read-only walk, no UI mutations)
 	type rankedNode struct {
-		node *tview.TreeNode
-		rank int
+		node   *tview.TreeNode
+		parent *tview.TreeNode
+		rank   int
 	}
 	var rankedNodes []rankedNode
 
@@ -545,11 +555,8 @@ func (tree *Tree) search(searchText string) {
 		if databaseNameFilter == "" {
 			rank := fuzzy.RankMatch(tableNameFilter, nodeText)
 			if rank >= 0 {
-				if parent != nil {
-					parent.SetExpanded(true)
-				}
 				adjustedRank := prioritizeResult(tableNameFilter, nodeText, rank)
-				rankedNodes = append(rankedNodes, rankedNode{node: node, rank: adjustedRank})
+				rankedNodes = append(rankedNodes, rankedNode{node: node, parent: parent, rank: adjustedRank})
 			}
 		} else {
 			rank := fuzzy.RankMatch(tableNameFilter, nodeText)
@@ -557,12 +564,10 @@ func (tree *Tree) search(searchText string) {
 				parentText := strings.ToLower(parent.GetText())
 				parentRank := fuzzy.RankMatch(databaseNameFilter, parentText)
 				if parentRank >= 0 {
-					parent.SetExpanded(true)
 					adjustedTableRank := prioritizeResult(tableNameFilter, nodeText, rank)
 					adjustedParentRank := prioritizeResult(databaseNameFilter, parentText, parentRank)
-					// Combine ranks: prioritize table match but factor in database match
 					combinedRank := adjustedTableRank + (adjustedParentRank / 2)
-					rankedNodes = append(rankedNodes, rankedNode{node: node, rank: combinedRank})
+					rankedNodes = append(rankedNodes, rankedNode{node: node, parent: parent, rank: combinedRank})
 				}
 			}
 		}
@@ -574,15 +579,27 @@ func (tree *Tree) search(searchText string) {
 		return rankedNodes[i].rank < rankedNodes[j].rank
 	})
 
-	for _, rn := range rankedNodes {
-		tree.state.searchFoundNodes = append(tree.state.searchFoundNodes, rn.node)
-	}
+	App.QueueUpdateDraw(func() {
+		if atomic.LoadInt64(&tree.searchGeneration) != myGen {
+			return
+		}
 
-	// Set current node to best match
-	if len(tree.state.searchFoundNodes) > 0 {
-		tree.SetCurrentNode(tree.state.searchFoundNodes[0])
-		tree.state.currentFocusFoundNode = tree.state.searchFoundNodes[0]
-	}
+		tree.state.searchFoundNodes = []*tview.TreeNode{}
+		for _, rn := range rankedNodes {
+			tree.state.searchFoundNodes = append(tree.state.searchFoundNodes, rn.node)
+			if rn.parent != nil {
+				rn.parent.SetExpanded(true)
+			}
+		}
+
+		if len(tree.state.searchFoundNodes) > 0 {
+			tree.SetCurrentNode(tree.state.searchFoundNodes[0])
+			tree.state.currentFocusFoundNode = tree.state.searchFoundNodes[0]
+			tree.FoundNodeCountInput.SetText(fmt.Sprintf("[1/%d]", len(tree.state.searchFoundNodes)))
+		} else {
+			tree.FoundNodeCountInput.SetText("[0/0]")
+		}
+	})
 }
 
 // Subscribe to changes in the tree state

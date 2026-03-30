@@ -855,31 +855,35 @@ func (tree *Tree) InitializeNodes(dbName string) {
 				return
 			}
 
-			tree.databasesToNodes(tables, node, true)
-
-			if tree.DBDriver.SupportsProgramming() {
-				functions, err := tree.DBDriver.GetFunctions(database)
-				if err != nil {
-					logger.Error(err.Error(), nil)
-					return
-				}
-
-				procedures, err := tree.DBDriver.GetProcedures(database)
-				if err != nil {
-					logger.Error(err.Error(), nil)
-					return
-				}
-
-				views, err := tree.DBDriver.GetViews(database)
-				if err != nil {
-					logger.Error(err.Error(), nil)
-					return
-				}
-
-				tree.addProgrammingNodes(functions, procedures, views, node)
+			if !tree.DBDriver.SupportsProgramming() {
+				App.QueueUpdateDraw(func() {
+					tree.databasesToNodes(tables, node, true)
+				})
+				return
 			}
 
-			App.Draw()
+			functions, err := tree.DBDriver.GetFunctions(database)
+			if err != nil {
+				logger.Error(err.Error(), nil)
+				return
+			}
+
+			procedures, err := tree.DBDriver.GetProcedures(database)
+			if err != nil {
+				logger.Error(err.Error(), nil)
+				return
+			}
+
+			views, err := tree.DBDriver.GetViews(database)
+			if err != nil {
+				logger.Error(err.Error(), nil)
+				return
+			}
+
+			App.QueueUpdateDraw(func() {
+				tree.databasesToNodes(tables, node, true)
+				tree.addProgrammingNodes(functions, procedures, views, node)
+			})
 		}(database, childNode)
 	}
 }
@@ -892,7 +896,18 @@ func (tree *Tree) Refresh(dbName string) {
 }
 
 func (tree *Tree) ClearSearch() {
-	tree.search("")
+	// Invalidate any in-flight search goroutines.
+	atomic.AddInt64(&tree.searchGeneration, 1)
+
+	// Collapse and clear directly (we're already on the main thread).
+	tree.state.searchFoundNodes = []*tview.TreeNode{}
+	rootNode := tree.GetRoot()
+	rootNode.Walk(func(_, parent *tview.TreeNode) bool {
+		if parent != nil && parent != rootNode && parent.IsExpanded() {
+			parent.SetExpanded(false)
+		}
+		return true
+	})
 	tree.FoundNodeCountInput.SetText("")
 	tree.SetBorderPadding(0, 0, 0, 0)
 	tree.Filter.SetText("")

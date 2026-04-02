@@ -64,6 +64,7 @@ const (
 	eventSidebarToggling      string = "TogglingSidebar"
 	eventSidebarCommitEditing string = "CommitEditingSidebar"
 	eventSidebarError         string = "ErrorSidebar"
+	eventSidebarShowJSON      string = "ShowJSONSidebar"
 
 	eventSQLEditorQuery  string = "Query"
 	eventSQLEditorEscape string = "Escape"

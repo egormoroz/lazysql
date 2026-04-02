@@ -279,6 +279,11 @@ func (table *ResultsTable) subscribeToSidebarChanges() {
 			}
 
 			App.ForceDraw()
+		case eventSidebarShowJSON:
+			cmd := stateChange.Value.(commands.Command)
+			App.QueueUpdateDraw(func() {
+				table.handleShowJSONViewer(cmd)
+			})
 		case eventSidebarError:
 			errorMessage := stateChange.Value.(string)
 			table.SetError(errorMessage, nil)

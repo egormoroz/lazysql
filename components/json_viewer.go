@@ -108,6 +108,7 @@ func (v *JSONViewer) Show(rowData map[string]string, focus tview.Primitive) {
 	}
 
 	v.Pages.ShowPage(pageNameJSONViewer)
+	v.Pages.SendToFront(pageNameJSONViewer)
 	App.SetFocus(v.TextView)
 }
 

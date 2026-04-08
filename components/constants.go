@@ -59,11 +59,13 @@ const (
 
 // Events
 const (
-	eventSidebarEditing       string = "EditingSidebar"
-	eventSidebarUnfocusing    string = "UnfocusingSidebar"
-	eventSidebarToggling      string = "TogglingSidebar"
-	eventSidebarCommitEditing string = "CommitEditingSidebar"
-	eventSidebarError         string = "ErrorSidebar"
+	eventSidebarEditing           string = "EditingSidebar"
+	eventSidebarUnfocusing        string = "UnfocusingSidebar"
+	eventSidebarToggling          string = "TogglingSidebar"
+	eventSidebarCommitEditing     string = "CommitEditingSidebar"
+	eventSidebarError             string = "ErrorSidebar"
+	eventSidebarShowRowJSONViewer string = "ShowRowJSONViewerSidebar"
+	eventSidebarShowCellJSONViewer string = "ShowCellJSONViewerSidebar"
 
 	eventSQLEditorQuery  string = "Query"
 	eventSQLEditorEscape string = "Escape"

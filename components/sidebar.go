@@ -308,6 +308,12 @@ func (sidebar *Sidebar) inputCapture(event *tcell.EventKey) *tcell.EventKey {
 		if err != nil {
 			sidebar.Publish(models.StateChange{Key: eventSidebarError, Value: err.Error()})
 		}
+	case commands.ShowRowJSONViewer:
+		sidebar.Publish(models.StateChange{Key: eventSidebarShowRowJSONViewer, Value: nil})
+		return nil
+	case commands.ShowCellJSONViewer:
+		sidebar.Publish(models.StateChange{Key: eventSidebarShowCellJSONViewer, Value: nil})
+		return nil
 	}
 	return event
 }

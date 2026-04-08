@@ -282,6 +282,15 @@ func (table *ResultsTable) subscribeToSidebarChanges() {
 		case eventSidebarError:
 			errorMessage := stateChange.Value.(string)
 			table.SetError(errorMessage, nil)
+		case eventSidebarShowRowJSONViewer:
+			App.QueueUpdateDraw(func() {
+				table.handleShowJSONViewer(commands.ShowRowJSONViewer)
+			})
+		case eventSidebarShowCellJSONViewer:
+			App.QueueUpdateDraw(func() {
+				table.handleShowJSONViewer(commands.ShowCellJSONViewer)
+			})
+
 		}
 	}
 }

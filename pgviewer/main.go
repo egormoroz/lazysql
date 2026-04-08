@@ -119,7 +119,7 @@ func (m AppModel) View() string {
 	main := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
 	help := helpBarStyle.Render(
-		"tab: switch panel  j/k: navigate  enter: select  /: filter  n/p: page  q: quit",
+		"tab: switch panel  j/k: navigate  enter: select  /: filter  n/p: page  esc: cancel  q: quit",
 	)
 
 	return lipgloss.JoinVertical(lipgloss.Left, main, help)

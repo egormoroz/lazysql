@@ -47,6 +47,9 @@ type TableModel struct {
 	firstCursor []any // cursor to go backward from current page
 	lastCursor  []any // cursor to go forward from current page
 
+	// Query cancellation.
+	cancel context.CancelFunc
+
 	// Layout.
 	width   int
 	height  int
@@ -68,6 +71,8 @@ func (m TableModel) Init() tea.Cmd { return nil }
 
 // LoadTable initiates loading data for the given table.
 func (m *TableModel) LoadTable(schema, table string) tea.Cmd {
+	// Cancel any in-flight query for the previous table.
+	m.cancelQuery()
 	m.schema = schema
 	m.table = table
 	m.loading = true
@@ -79,15 +84,35 @@ func (m *TableModel) LoadTable(schema, table string) tea.Cmd {
 	m.scrollCol = 0
 	m.firstCursor = nil
 	m.lastCursor = nil
-	return m.fetchPage(DirFirst, nil)
+	return m.newFetch(DirFirst, nil)
 }
 
-func (m TableModel) fetchPage(dir Direction, cursor []any) tea.Cmd {
+// cancelQuery cancels any in-flight query.
+func (m *TableModel) cancelQuery() {
+	if m.cancel != nil {
+		slog.Debug("cancelling in-flight query", "schema", m.schema, "table", m.table)
+		m.cancel()
+		m.cancel = nil
+	}
+}
+
+// newFetch cancels any previous query, creates a new cancellable context,
+// stores its cancel func, and returns a tea.Cmd that runs the query.
+func (m *TableModel) newFetch(dir Direction, cursor []any) tea.Cmd {
+	m.cancelQuery()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+
 	db := m.db
 	schema, table := m.schema, m.table
 	pageSize := m.pageSize
 	return func() tea.Msg {
-		page, err := db.FetchPage(context.Background(), schema, table, pageSize, dir, cursor)
+		page, err := db.FetchPage(ctx, schema, table, pageSize, dir, cursor)
+		if err != nil && ctx.Err() != nil {
+			slog.Info("query cancelled", "schema", schema, "table", table)
+			return pageLoadedMsg{schema: schema, table: table, err: fmt.Errorf("query cancelled")}
+		}
 		return pageLoadedMsg{page: page, schema: schema, table: table, err: err}
 	}
 }
@@ -126,6 +151,14 @@ func (m TableModel) Update(msg tea.Msg) (TableModel, tea.Cmd) {
 }
 
 func (m TableModel) handleKey(msg tea.KeyMsg) (TableModel, tea.Cmd) {
+	// Escape cancels in-flight queries regardless of state.
+	if msg.String() == "esc" && m.loading {
+		m.cancelQuery()
+		m.loading = false
+		m.err = fmt.Errorf("cancelled")
+		return m, nil
+	}
+
 	if m.page == nil || m.loading {
 		return m, nil
 	}
@@ -157,13 +190,13 @@ func (m TableModel) handleKey(msg tea.KeyMsg) (TableModel, tea.Cmd) {
 		if m.page.HasNext && m.lastCursor != nil {
 			m.loading = true
 			m.pageNum++
-			return m, m.fetchPage(DirForward, m.lastCursor)
+			return m, m.newFetch(DirForward, m.lastCursor)
 		}
 	case "p": // previous page
 		if m.page.HasPrev && m.firstCursor != nil {
 			m.loading = true
 			m.pageNum--
-			return m, m.fetchPage(DirBackward, m.firstCursor)
+			return m, m.newFetch(DirBackward, m.firstCursor)
 		}
 	case "g":
 		m.cursorRow = 0

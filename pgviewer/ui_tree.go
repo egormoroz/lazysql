@@ -53,12 +53,12 @@ type TreeModel struct {
 	expanded map[string]bool
 
 	// Filter input at top.
-	filter   textinput.Model
+	filter    textinput.Model
 	filtering bool
 
 	// Layout
-	width  int
-	height int
+	width   int
+	height  int
 	focused bool
 }
 
@@ -221,9 +221,7 @@ func (m *TreeModel) sortEntries() {
 
 	m.allEntries = nil
 	for _, s := range schemas {
-		for _, e := range schemaMap[s] {
-			m.allEntries = append(m.allEntries, e)
-		}
+		m.allEntries = append(m.allEntries, schemaMap[s]...)
 	}
 }
 
@@ -267,12 +265,12 @@ func fuzzyMatch(s, query string) bool {
 // --- View ---
 
 var (
-	treeSchemaStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	treeTableStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
-	treeCursorStyle    = lipgloss.NewStyle().Background(lipgloss.Color("8")).Foreground(lipgloss.Color("15"))
-	treeTitleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10")).Padding(0, 1)
-	treeBorderStyle    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8"))
-	treeFocusBorder    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("12"))
+	treeSchemaStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	treeTableStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+	treeCursorStyle = lipgloss.NewStyle().Background(lipgloss.Color("8")).Foreground(lipgloss.Color("15"))
+	treeTitleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10")).Padding(0, 1)
+	treeBorderStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8"))
+	treeFocusBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("12"))
 )
 
 func (m TreeModel) View() string {

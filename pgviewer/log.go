@@ -33,5 +33,5 @@ func InitLogger(path string) (func(), error) {
 	slog.SetDefault(slog.New(handler))
 
 	slog.Info("logger initialized", "file", path)
-	return func() { f.Close() }, nil
+	return func() { _ = f.Close() }, nil
 }

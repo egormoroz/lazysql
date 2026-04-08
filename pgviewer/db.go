@@ -28,8 +28,8 @@ type TableColumn struct {
 // KeysetPage holds a page of rows plus navigation cursors.
 type KeysetPage struct {
 	Columns []TableColumn
-	Rows    [][]any      // len <= pageSize
-	PKCols  []string     // primary key column names (ordered)
+	Rows    [][]any  // len <= pageSize
+	PKCols  []string // primary key column names (ordered)
 	HasNext bool
 	HasPrev bool
 	// Cursor values for the first and last row's PK, used for navigation.

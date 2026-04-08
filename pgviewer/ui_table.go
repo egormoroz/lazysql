@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -96,10 +97,12 @@ func (m TableModel) Update(msg tea.Msg) (TableModel, tea.Cmd) {
 	case pageLoadedMsg:
 		// Ignore stale loads for a different table.
 		if msg.schema != m.schema || msg.table != m.table {
+			slog.Debug("ignoring stale page load", "got", msg.schema+"."+msg.table, "want", m.schema+"."+m.table)
 			return m, nil
 		}
 		m.loading = false
 		if msg.err != nil {
+			slog.Error("page load failed", "schema", msg.schema, "table", msg.table, "error", msg.err)
 			m.err = msg.err
 			m.page = nil
 			return m, nil

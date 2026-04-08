@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -100,6 +101,7 @@ func (m TreeModel) Update(msg tea.Msg) (TreeModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case schemasLoadedMsg:
 		if msg.err != nil {
+			slog.Error("failed to load schemas", "error", msg.err)
 			return m, nil
 		}
 		m.allEntries = nil

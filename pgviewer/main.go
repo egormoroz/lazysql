@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -67,6 +68,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tableSelectedMsg:
+		slog.Info("table selected", "schema", msg.schema, "table", msg.table)
 		m.focus = focusTable
 		m.tree.focused = false
 		m.table.focused = true
@@ -130,16 +132,30 @@ var helpBarStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 func main() {
 	configPath := flag.String("config", "", "path to config YAML file")
 	connURL := flag.String("url", "", "postgres connection URL (overrides config)")
+	logFile := flag.String("log", "", "log file path (default: /tmp/pgviewer.log)")
 	flag.Parse()
 
 	var db *DB
 	var pageSize int
 	ctx := context.Background()
 
+	// Determine log file: flag > config > default.
+	logPath := defaultLogFile
+	if *logFile != "" {
+		logPath = *logFile
+	}
+
 	switch {
 	case *connURL != "":
+		closeLog, err := InitLogger(logPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not open log file: %v\n", err)
+		} else {
+			defer closeLog()
+		}
+		slog.Info("starting pgviewer", "mode", "url")
+
 		pageSize = 100
-		var err error
 		db, err = NewDB(ctx, *connURL)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -152,6 +168,18 @@ func main() {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
+		// Config can override log path.
+		if *logFile == "" && cfg.LogFile != "" {
+			logPath = cfg.LogFile
+		}
+		closeLog, err := InitLogger(logPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not open log file: %v\n", err)
+		} else {
+			defer closeLog()
+		}
+		slog.Info("starting pgviewer", "mode", "config", "config", *configPath)
+
 		pageSize = cfg.PageSize
 		// Use first connection for now.
 		db, err = NewDB(ctx, cfg.Connections[0].URL)
@@ -171,8 +199,15 @@ func main() {
 			fmt.Fprintln(os.Stderr, "  or set PGVIEWER_URL / DATABASE_URL environment variable")
 			os.Exit(1)
 		}
+		closeLog, err := InitLogger(logPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not open log file: %v\n", err)
+		} else {
+			defer closeLog()
+		}
+		slog.Info("starting pgviewer", "mode", "env")
+
 		pageSize = 100
-		var err error
 		db, err = NewDB(ctx, url)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -182,9 +217,12 @@ func main() {
 	defer db.Close()
 
 	app := NewAppModel(db, pageSize)
+	slog.Info("launching TUI")
 	p := tea.NewProgram(app, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
+		slog.Error("TUI crashed", "error", err)
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	slog.Info("pgviewer exited cleanly")
 }

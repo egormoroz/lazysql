@@ -1,0 +1,18 @@
+# pgviewer configuration
+#
+# Environment variables are expanded with standard ${VAR} syntax.
+# Example: url: postgres://${PGUSER}:${PGPASSWORD}@localhost:5432/${PGDATABASE}
+
+connections:
+  - name: local-dev
+    url: postgres://postgres:postgres@localhost:5432/myapp?sslmode=disable
+
+  - name: staging
+    url: postgres://${PGUSER}:${PGPASSWORD}@staging-db.internal:5432/myapp?sslmode=require
+
+# Rows per page (default: 100)
+page_size: 100
+
+# Log file path (default: /tmp/pgviewer.log)
+# Set to "" to disable file logging.
+log_file: /tmp/pgviewer.log

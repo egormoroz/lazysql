@@ -17,6 +17,7 @@ type Connection struct {
 type Config struct {
 	Connections []Connection `yaml:"connections"`
 	PageSize    int          `yaml:"page_size"` // rows per page, default 100
+	LogFile     string       `yaml:"log_file"`  // log file path, default /tmp/pgviewer.log
 }
 
 func LoadConfig(path string) (*Config, error) {

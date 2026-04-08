@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -53,14 +55,18 @@ const (
 )
 
 func NewDB(ctx context.Context, connURL string) (*DB, error) {
+	slog.Info("connecting to database")
 	pool, err := pgxpool.New(ctx, connURL)
 	if err != nil {
+		slog.Error("connection failed", "error", err)
 		return nil, fmt.Errorf("connect: %w", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
+		slog.Error("ping failed", "error", err)
 		return nil, fmt.Errorf("ping: %w", err)
 	}
+	slog.Info("connected to database")
 	return &DB{pool: pool}, nil
 }
 
@@ -70,12 +76,14 @@ func (db *DB) Close() {
 
 // Schemas returns all non-system schema names.
 func (db *DB) Schemas(ctx context.Context) ([]string, error) {
+	slog.Debug("loading schemas")
 	rows, err := db.pool.Query(ctx, `
 		SELECT schema_name
 		FROM information_schema.schemata
 		WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
 		ORDER BY schema_name`)
 	if err != nil {
+		slog.Error("schemas query failed", "error", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -88,11 +96,16 @@ func (db *DB) Schemas(ctx context.Context) ([]string, error) {
 		}
 		schemas = append(schemas, s)
 	}
-	return schemas, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	slog.Info("loaded schemas", "count", len(schemas))
+	return schemas, nil
 }
 
 // Tables returns all table names in a schema.
 func (db *DB) Tables(ctx context.Context, schema string) ([]string, error) {
+	slog.Debug("loading tables", "schema", schema)
 	rows, err := db.pool.Query(ctx, `
 		SELECT table_name
 		FROM information_schema.tables
@@ -100,6 +113,7 @@ func (db *DB) Tables(ctx context.Context, schema string) ([]string, error) {
 		  AND table_type = 'BASE TABLE'
 		ORDER BY table_name`, schema)
 	if err != nil {
+		slog.Error("tables query failed", "schema", schema, "error", err)
 		return nil, err
 	}
 	defer rows.Close()
@@ -112,7 +126,11 @@ func (db *DB) Tables(ctx context.Context, schema string) ([]string, error) {
 		}
 		tables = append(tables, t)
 	}
-	return tables, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	slog.Info("loaded tables", "schema", schema, "count", len(tables))
+	return tables, nil
 }
 
 // Columns returns column metadata for a table.
@@ -234,13 +252,20 @@ func (db *DB) FetchPage(
 	dir Direction,
 	cursor []any,
 ) (*KeysetPage, error) {
+	start := time.Now()
+	dirName := [...]string{"forward", "backward", "first"}[dir]
+	slog.Debug("fetch page", "schema", schema, "table", table, "dir", dirName, "pageSize", pageSize)
+
 	pkCols, err := db.pkColumns(ctx, schema, table)
 	if err != nil {
+		slog.Error("pk columns failed", "schema", schema, "table", table, "error", err)
 		return nil, fmt.Errorf("pk columns: %w", err)
 	}
 	if len(pkCols) == 0 {
+		slog.Error("no pk or unique index", "schema", schema, "table", table)
 		return nil, fmt.Errorf("table %s.%s has no primary key or unique index", schema, table)
 	}
+	slog.Debug("resolved pk columns", "schema", schema, "table", table, "pk", pkCols)
 
 	cols, err := db.Columns(ctx, schema, table)
 	if err != nil {
@@ -296,8 +321,11 @@ func (db *DB) FetchPage(
 
 	fmt.Fprintf(&qb, " LIMIT %d", pageSize+1)
 
-	rows, err := db.pool.Query(ctx, qb.String(), args...)
+	query := qb.String()
+	slog.Debug("executing query", "sql", query, "args", args)
+	rows, err := db.pool.Query(ctx, query, args...)
 	if err != nil {
+		slog.Error("query failed", "sql", query, "error", err)
 		return nil, fmt.Errorf("query: %w", err)
 	}
 	defer rows.Close()
@@ -353,6 +381,11 @@ func (db *DB) FetchPage(
 		page.LastCursor = extractCursor(allRows[len(allRows)-1], descs, pkCols)
 	}
 
+	slog.Info("page fetched",
+		"schema", schema, "table", table,
+		"rows", len(allRows), "hasNext", page.HasNext, "hasPrev", page.HasPrev,
+		"duration", time.Since(start),
+	)
 	return page, nil
 }
 

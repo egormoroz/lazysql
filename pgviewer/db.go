@@ -17,14 +17,6 @@ type DB struct {
 	pool *pgxpool.Pool
 }
 
-// SchemaTable identifies a table within a schema.
-type SchemaTable struct {
-	Schema string
-	Table  string
-}
-
-func (st SchemaTable) String() string { return st.Schema + "." + st.Table }
-
 // TableColumn describes a single column.
 type TableColumn struct {
 	Name     string
@@ -210,6 +202,7 @@ func (db *DB) pkColumns(ctx context.Context, schema, table string) ([]string, er
 }
 
 func (db *DB) firstUniqueIndex(ctx context.Context, schema, table string) ([]string, error) {
+	// Pick the first unique index (by OID) and return only its columns.
 	rows, err := db.pool.Query(ctx, `
 		SELECT a.attname
 		FROM pg_index i
@@ -220,8 +213,17 @@ func (db *DB) firstUniqueIndex(ctx context.Context, schema, table string) ([]str
 		  AND c.relname = $2
 		  AND i.indisunique
 		  AND NOT i.indisprimary
-		ORDER BY i.indexrelid, array_position(i.indkey, a.attnum)
-		LIMIT 10`, schema, table)
+		  AND i.indexrelid = (
+			SELECT i2.indexrelid
+			FROM pg_index i2
+			JOIN pg_class c2 ON c2.oid = i2.indrelid
+			JOIN pg_namespace n2 ON n2.oid = c2.relnamespace
+			WHERE n2.nspname = $1 AND c2.relname = $2
+			  AND i2.indisunique AND NOT i2.indisprimary
+			ORDER BY i2.indexrelid
+			LIMIT 1
+		  )
+		ORDER BY array_position(i.indkey, a.attnum)`, schema, table)
 	if err != nil {
 		return nil, err
 	}

@@ -52,19 +52,27 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
+		// ctrl+c always quits. Other global keys only apply
+		// when no child component is capturing text input.
+		if msg.String() == "ctrl+c" {
 			m.quitting = true
 			return m, tea.Quit
-		case "tab":
-			if m.focus == focusTree {
-				m.focus = focusTable
-			} else {
-				m.focus = focusTree
+		}
+		if !m.tree.filtering {
+			switch msg.String() {
+			case "q":
+				m.quitting = true
+				return m, tea.Quit
+			case "tab":
+				if m.focus == focusTree {
+					m.focus = focusTable
+				} else {
+					m.focus = focusTree
+				}
+				m.tree.focused = m.focus == focusTree
+				m.table.focused = m.focus == focusTable
+				return m, nil
 			}
-			m.tree.focused = m.focus == focusTree
-			m.table.focused = m.focus == focusTable
-			return m, nil
 		}
 
 	case tableSelectedMsg:
@@ -145,43 +153,44 @@ func main() {
 		logPath = *logFile
 	}
 
+	// If using a config file, it may override the log path —
+	// parse it first so we can init the logger with the right path.
+	var cfg *Config
+	if *configPath != "" {
+		var err error
+		cfg, err = LoadConfig(*configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if *logFile == "" && cfg.LogFile != "" {
+			logPath = cfg.LogFile
+		}
+	}
+
+	// Init logger once. Always returns a valid closer (slog goes
+	// to discard on failure so it never corrupts the TUI).
+	closeLog, logErr := InitLogger(logPath)
+	defer closeLog()
+	if logErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not open log file: %v\n", logErr)
+	}
+
 	switch {
 	case *connURL != "":
-		closeLog, err := InitLogger(logPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not open log file: %v\n", err)
-		} else {
-			defer closeLog()
-		}
 		slog.Info("starting pgviewer", "mode", "url")
-
 		pageSize = 100
+		var err error
 		db, err = NewDB(ctx, *connURL)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
 
-	case *configPath != "":
-		cfg, err := LoadConfig(*configPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		// Config can override log path.
-		if *logFile == "" && cfg.LogFile != "" {
-			logPath = cfg.LogFile
-		}
-		closeLog, err := InitLogger(logPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not open log file: %v\n", err)
-		} else {
-			defer closeLog()
-		}
+	case cfg != nil:
 		slog.Info("starting pgviewer", "mode", "config", "config", *configPath)
-
 		pageSize = cfg.PageSize
-		// Use first connection for now.
+		var err error
 		db, err = NewDB(ctx, cfg.Connections[0].URL)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error connecting to %s: %v\n", cfg.Connections[0].Name, err)
@@ -189,7 +198,6 @@ func main() {
 		}
 
 	default:
-		// Try PGVIEWER_URL env, then DATABASE_URL.
 		url := os.Getenv("PGVIEWER_URL")
 		if url == "" {
 			url = os.Getenv("DATABASE_URL")
@@ -199,15 +207,9 @@ func main() {
 			fmt.Fprintln(os.Stderr, "  or set PGVIEWER_URL / DATABASE_URL environment variable")
 			os.Exit(1)
 		}
-		closeLog, err := InitLogger(logPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not open log file: %v\n", err)
-		} else {
-			defer closeLog()
-		}
 		slog.Info("starting pgviewer", "mode", "env")
-
 		pageSize = 100
+		var err error
 		db, err = NewDB(ctx, url)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)

@@ -357,7 +357,7 @@ func (m TableModel) renderRow(rowIdx int, visCols []int) string {
 			// Header.
 			cell = m.page.Columns[c].Name
 			if m.page.Columns[c].IsPK {
-				cell += " 🔑"
+				cell += "*"
 			}
 			style = tableHeaderStyle
 		} else {

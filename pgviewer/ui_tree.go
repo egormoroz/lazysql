@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -206,20 +207,20 @@ func selectTable(schema, table string) tea.Cmd {
 }
 
 func (m *TreeModel) sortEntries() {
-	// Group by schema, sorted.
+	// Group by schema, then sort schemas alphabetically.
 	schemaMap := make(map[string][]treeEntry)
-	var schemaOrder []string
-	seen := make(map[string]bool)
 	for _, e := range m.allEntries {
-		if !seen[e.schema] {
-			schemaOrder = append(schemaOrder, e.schema)
-			seen[e.schema] = true
-		}
 		schemaMap[e.schema] = append(schemaMap[e.schema], e)
 	}
 
+	schemas := make([]string, 0, len(schemaMap))
+	for s := range schemaMap {
+		schemas = append(schemas, s)
+	}
+	slices.Sort(schemas)
+
 	m.allEntries = nil
-	for _, s := range schemaOrder {
+	for _, s := range schemas {
 		for _, e := range schemaMap[s] {
 			m.allEntries = append(m.allEntries, e)
 		}

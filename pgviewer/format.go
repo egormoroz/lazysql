@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/mattn/go-runewidth"
 )
 
 const maxCellWidth = 40
@@ -60,32 +62,29 @@ func formatArray(arr []any) string {
 	return "{" + strings.Join(parts, ",") + "}"
 }
 
-// Truncate shortens s to maxLen, appending an ellipsis if truncated.
+// Truncate shortens s to maxLen display cells, appending an ellipsis if truncated.
 func Truncate(s string, maxLen int) string {
-	// Replace newlines/tabs with spaces for single-line display.
 	s = strings.NewReplacer("\n", "\\n", "\r", "", "\t", " ").Replace(s)
-	runes := []rune(s)
-	if len(runes) <= maxLen {
+	if runewidth.StringWidth(s) <= maxLen {
 		return s
 	}
-	return string(runes[:maxLen-1]) + "…"
+	return runewidth.Truncate(s, maxLen, "…")
 }
 
-// ColumnWidth computes a reasonable display width for a column
-// based on its name length and a sample of values.
-func ColumnWidth(name string, samples []string, min, max int) int {
-	w := len(name)
+// ColumnWidth computes a reasonable display width (in terminal cells) for a
+// column based on its name and a sample of values.
+func ColumnWidth(name string, samples []string, minW, maxW int) int {
+	w := runewidth.StringWidth(name)
 	for _, s := range samples {
-		if len(s) > w {
-			w = len(s)
+		if sw := runewidth.StringWidth(s); sw > w {
+			w = sw
 		}
 	}
-	// Clamp.
-	if w < min {
-		w = min
+	if w < minW {
+		w = minW
 	}
-	if w > max {
-		w = max
+	if w > maxW {
+		w = maxW
 	}
 	return w
 }

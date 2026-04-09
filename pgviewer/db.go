@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -25,26 +24,23 @@ type TableColumn struct {
 	IsPK     bool
 }
 
-// KeysetPage holds a page of rows plus navigation cursors.
-type KeysetPage struct {
+// Page holds a page of rows with offset-based pagination metadata.
+type Page struct {
 	Columns []TableColumn
-	Rows    [][]any  // len <= pageSize
-	PKCols  []string // primary key column names (ordered)
+	Rows    [][]any
 	HasNext bool
 	HasPrev bool
-	// Cursor values for the first and last row's PK, used for navigation.
-	FirstCursor []any
-	LastCursor  []any
 }
 
-// Direction indicates keyset fetch direction.
-type Direction int
-
-const (
-	DirForward  Direction = iota
-	DirBackward           // fetch page before cursor
-	DirFirst              // fetch first page (no cursor)
-)
+// TableQuery describes a paginated SELECT query with optional filter and sort.
+type TableQuery struct {
+	Schema   string
+	Table    string
+	Where    string // raw SQL predicate, e.g. "status = 'active'"
+	OrderBy  string // raw SQL order clause, e.g. "created_at DESC"
+	PageSize int
+	Offset   int
+}
 
 func NewDB(ctx context.Context, connURL string) (*DB, error) {
 	cfg, err := pgxpool.ParseConfig(connURL)
@@ -178,260 +174,97 @@ func (db *DB) Columns(ctx context.Context, schema, table string) ([]TableColumn,
 	return cols, rows.Err()
 }
 
-// pkColumns returns the ordered PK column names for a table.
-// Falls back to a unique index if no PK exists.
-func (db *DB) pkColumns(ctx context.Context, schema, table string) ([]string, error) {
-	rows, err := db.pool.Query(ctx, `
-		SELECT a.attname
-		FROM pg_index i
-		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-		JOIN pg_class c ON c.oid = i.indrelid
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1
-		  AND c.relname = $2
-		  AND i.indisprimary
-		ORDER BY array_position(i.indkey, a.attnum)`, schema, table)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var cols []string
-	for rows.Next() {
-		var col string
-		if err := rows.Scan(&col); err != nil {
-			return nil, err
-		}
-		cols = append(cols, col)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	if len(cols) > 0 {
-		return cols, nil
-	}
-
-	// Fall back to the first unique index.
-	return db.firstUniqueIndex(ctx, schema, table)
-}
-
-func (db *DB) firstUniqueIndex(ctx context.Context, schema, table string) ([]string, error) {
-	// Pick the first unique index (by OID) and return only its columns.
-	rows, err := db.pool.Query(ctx, `
-		SELECT a.attname
-		FROM pg_index i
-		JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-		JOIN pg_class c ON c.oid = i.indrelid
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1
-		  AND c.relname = $2
-		  AND i.indisunique
-		  AND NOT i.indisprimary
-		  AND i.indexrelid = (
-			SELECT i2.indexrelid
-			FROM pg_index i2
-			JOIN pg_class c2 ON c2.oid = i2.indrelid
-			JOIN pg_namespace n2 ON n2.oid = c2.relnamespace
-			WHERE n2.nspname = $1 AND c2.relname = $2
-			  AND i2.indisunique AND NOT i2.indisprimary
-			ORDER BY i2.indexrelid
-			LIMIT 1
-		  )
-		ORDER BY array_position(i.indkey, a.attnum)`, schema, table)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var cols []string
-	for rows.Next() {
-		var col string
-		if err := rows.Scan(&col); err != nil {
-			return nil, err
-		}
-		cols = append(cols, col)
-	}
-	return cols, rows.Err()
-}
-
-// FetchPage retrieves a page of rows using keyset pagination.
-//
-// cursor holds the PK values of the boundary row (last row for forward,
-// first row for backward). Pass nil for the first page.
-//
-// The query always fetches pageSize+1 rows; the extra row is used to
-// detect whether another page exists in the given direction, then dropped.
-func (db *DB) FetchPage(
-	ctx context.Context,
-	schema, table string,
-	pageSize int,
-	dir Direction,
-	cursor []any,
-) (*KeysetPage, error) {
+// FetchPage runs a TableQuery and returns the result page.
+func (db *DB) FetchPage(ctx context.Context, q TableQuery) (*Page, error) {
 	start := time.Now()
-	dirName := [...]string{"forward", "backward", "first"}[dir]
-	slog.Debug("fetch page", "schema", schema, "table", table, "dir", dirName, "pageSize", pageSize)
+	slog.Debug("fetch page",
+		"schema", q.Schema, "table", q.Table,
+		"where", q.Where, "orderBy", q.OrderBy,
+		"offset", q.Offset, "pageSize", q.PageSize)
 
-	pkCols, err := db.pkColumns(ctx, schema, table)
-	if err != nil {
-		slog.Error("pk columns failed", "schema", schema, "table", table, "error", err)
-		return nil, fmt.Errorf("pk columns: %w", err)
-	}
-	if len(pkCols) == 0 {
-		slog.Error("no pk or unique index", "schema", schema, "table", table)
-		return nil, fmt.Errorf("table %s.%s has no primary key or unique index", schema, table)
-	}
-	slog.Debug("resolved pk columns", "schema", schema, "table", table, "pk", pkCols)
-
-	cols, err := db.Columns(ctx, schema, table)
+	cols, err := db.Columns(ctx, q.Schema, q.Table)
 	if err != nil {
 		return nil, fmt.Errorf("columns: %w", err)
 	}
 
-	query, args := buildKeysetQuery(schema, table, pkCols, dir, cursor, pageSize)
-	slog.Debug("executing query", "sql", query, "args", args)
-	rows, err := db.pool.Query(ctx, query, args...)
+	// Default sort by PK columns when no custom order is specified.
+	if q.OrderBy == "" {
+		q.OrderBy = defaultOrder(cols)
+	}
+
+	query := q.Build()
+	slog.Debug("executing query", "sql", query)
+
+	rows, err := db.pool.Query(ctx, query)
 	if err != nil {
 		slog.Error("query failed", "sql", query, "error", err)
 		return nil, fmt.Errorf("query: %w", err)
 	}
-	defer rows.Close()
-
-	page, err := assembleKeysetPage(rows, cols, pkCols, dir, pageSize)
+	allRows, err := collectRows(rows)
 	if err != nil {
 		return nil, err
 	}
 
+	// We fetched pageSize+1; the extra row tells us if there's a next page.
+	hasNext := len(allRows) > q.PageSize
+	if hasNext {
+		allRows = allRows[:q.PageSize]
+	}
+
+	page := &Page{
+		Columns: cols,
+		Rows:    allRows,
+		HasPrev: q.Offset > 0,
+		HasNext: hasNext,
+	}
+
 	slog.Info("page fetched",
-		"schema", schema, "table", table,
-		"rows", len(page.Rows), "hasNext", page.HasNext, "hasPrev", page.HasPrev,
+		"schema", q.Schema, "table", q.Table,
+		"rows", len(allRows),
 		"duration", time.Since(start),
 	)
 	return page, nil
 }
 
-func assembleKeysetPage(
-	rows pgx.Rows, cols []TableColumn, pkCols []string,
-	dir Direction, pageSize int,
-) (*KeysetPage, error) {
-	descs := rows.FieldDescriptions()
-	var allRows [][]any
+func collectRows(rows pgx.Rows) ([][]any, error) {
+	defer rows.Close()
+	var result [][]any
 	for rows.Next() {
 		vals, err := rows.Values()
 		if err != nil {
 			return nil, err
 		}
-		allRows = append(allRows, vals)
+		result = append(result, vals)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	hasMore := len(allRows) > pageSize
-	if hasMore {
-		allRows = allRows[:pageSize]
-	}
-
-	// Backward fetch returns rows in reverse order — flip them.
-	if dir == DirBackward {
-		for i, j := 0, len(allRows)-1; i < j; i, j = i+1, j-1 {
-			allRows[i], allRows[j] = allRows[j], allRows[i]
-		}
-	}
-
-	page := &KeysetPage{
-		Columns: cols,
-		Rows:    allRows,
-		PKCols:  pkCols,
-	}
-
-	switch dir {
-	case DirFirst:
-		page.HasPrev = false
-		page.HasNext = hasMore
-	case DirForward:
-		page.HasPrev = true
-		page.HasNext = hasMore
-	case DirBackward:
-		page.HasPrev = hasMore
-		page.HasNext = true
-	}
-
-	if len(allRows) > 0 {
-		page.FirstCursor = extractCursor(allRows[0], descs, pkCols)
-		page.LastCursor = extractCursor(allRows[len(allRows)-1], descs, pkCols)
-	}
-	return page, nil
+	return result, rows.Err()
 }
 
-func buildKeysetQuery(
-	schema, table string,
-	pkCols []string,
-	dir Direction,
-	cursor []any,
-	pageSize int,
-) (string, []any) {
-	fqTable := pgx.Identifier{schema, table}.Sanitize()
-	orderCols := make([]string, len(pkCols))
-	for i, c := range pkCols {
-		orderCols[i] = pgx.Identifier{c}.Sanitize()
-	}
-
-	var qb strings.Builder
-	qb.WriteString("SELECT * FROM ")
-	qb.WriteString(fqTable)
-
-	args := make([]any, 0, len(cursor))
-	ascending := dir != DirBackward
-
-	if dir != DirFirst && len(cursor) == len(pkCols) {
-		qb.WriteString(" WHERE (")
-		qb.WriteString(strings.Join(orderCols, ", "))
-		qb.WriteString(")")
-		if ascending {
-			qb.WriteString(" > (")
-		} else {
-			qb.WriteString(" < (")
-		}
-		for i := range cursor {
-			if i > 0 {
-				qb.WriteString(", ")
-			}
-			args = append(args, cursor[i])
-			fmt.Fprintf(&qb, "$%d", i+1)
-		}
-		qb.WriteString(")")
-	}
-
-	qb.WriteString(" ORDER BY ")
-	for i, c := range orderCols {
-		if i > 0 {
-			qb.WriteString(", ")
-		}
-		qb.WriteString(c)
-		if ascending {
-			qb.WriteString(" ASC")
-		} else {
-			qb.WriteString(" DESC")
+// defaultOrder returns an ORDER BY clause from PK columns, or empty string.
+func defaultOrder(cols []TableColumn) string {
+	var pks []string
+	for _, c := range cols {
+		if c.IsPK {
+			pks = append(pks, pgx.Identifier{c.Name}.Sanitize())
 		}
 	}
-
-	fmt.Fprintf(&qb, " LIMIT %d", pageSize+1)
-	return qb.String(), args
+	return strings.Join(pks, ", ")
 }
 
-// extractCursor pulls PK column values from a row by matching column names.
-func extractCursor(row []any, descs []pgconn.FieldDescription, pkCols []string) []any {
-	colIndex := make(map[string]int, len(descs))
-	for i, d := range descs {
-		colIndex[d.Name] = i
+// Build returns a SELECT query that fetches pageSize+1 rows (the extra
+// row is used to detect whether a next page exists).
+func (q TableQuery) Build() string {
+	fqTable := pgx.Identifier{q.Schema, q.Table}.Sanitize()
+
+	where := ""
+	if q.Where != "" {
+		where = " WHERE " + q.Where
 	}
-	cursor := make([]any, len(pkCols))
-	for i, pk := range pkCols {
-		if idx, ok := colIndex[pk]; ok {
-			cursor[i] = row[idx]
-		}
+
+	orderBy := ""
+	if q.OrderBy != "" {
+		orderBy = " ORDER BY " + q.OrderBy
 	}
-	return cursor
+
+	return fmt.Sprintf("SELECT * FROM %s%s%s LIMIT %d OFFSET %d",
+		fqTable, where, orderBy, q.PageSize+1, q.Offset)
 }

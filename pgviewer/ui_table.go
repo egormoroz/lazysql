@@ -6,22 +6,26 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 // --- Messages ---
 
 type pageLoadedMsg struct {
-	page   *KeysetPage
-	schema string
-	table  string
-	err    error
+	rows    [][]any
+	columns []TableColumn
+	schema  string
+	table   string
+	hasMore bool
+	err     error
 }
 
 // --- Table model ---
 
-// TableModel displays rows from a table with keyset pagination.
+// TableModel displays rows with infinite scroll (loads more on demand).
 type TableModel struct {
 	db       *DB
 	pageSize int
@@ -30,22 +34,27 @@ type TableModel struct {
 	schema string
 	table  string
 
-	// Current page data.
-	page *KeysetPage
+	// Accumulated data across fetches.
+	columns []TableColumn
+	rows    [][]any
+	hasMore bool
 
 	// Column display widths.
 	colWidths []int
 
 	// Viewport state.
-	cursorRow int // selected row
-	cursorCol int // selected column
-	scrollRow int // first visible row
-	scrollCol int // first visible column
+	cursorRow int
+	cursorCol int
+	scrollRow int
+	scrollCol int
 
-	// Pagination cursors: history of page boundaries for backward navigation.
-	pageNum     int
-	firstCursor []any // cursor to go backward from current page
-	lastCursor  []any // cursor to go forward from current page
+	// User-defined filter and sort.
+	where   string
+	orderBy string
+
+	// Filter input.
+	filtering   bool
+	filterInput textinput.Model
 
 	// Query cancellation.
 	cancel context.CancelFunc
@@ -61,33 +70,52 @@ type TableModel struct {
 }
 
 func NewTableModel(db *DB, pageSize int) TableModel {
+	fi := textinput.New()
+	fi.Placeholder = "WHERE ..."
+	fi.CharLimit = 256
+
 	return TableModel{
-		db:       db,
-		pageSize: pageSize,
+		db:          db,
+		pageSize:    pageSize,
+		filterInput: fi,
 	}
 }
 
 func (m TableModel) Init() tea.Cmd { return nil }
 
-// LoadTable initiates loading data for the given table.
+// LoadTable resets state and loads the first batch for a new table.
 func (m *TableModel) LoadTable(schema, table string) tea.Cmd {
-	// Cancel any in-flight query for the previous table.
 	m.cancelQuery()
 	m.schema = schema
 	m.table = table
+	m.rows = nil
+	m.columns = nil
+	m.hasMore = false
 	m.loading = true
 	m.err = nil
-	m.pageNum = 0
 	m.cursorRow = 0
 	m.cursorCol = 0
 	m.scrollRow = 0
 	m.scrollCol = 0
-	m.firstCursor = nil
-	m.lastCursor = nil
-	return m.newFetch(DirFirst, nil)
+	m.where = ""
+	m.orderBy = ""
+	m.filterInput.SetValue("")
+	m.filtering = false
+	return m.fetchMore()
 }
 
-// cancelQuery cancels any in-flight query.
+// resetData clears accumulated rows and fetches from scratch (filter/sort change).
+func (m *TableModel) resetData() tea.Cmd {
+	m.cancelQuery()
+	m.rows = nil
+	m.hasMore = false
+	m.loading = true
+	m.err = nil
+	m.cursorRow = 0
+	m.scrollRow = 0
+	return m.fetchMore()
+}
+
 func (m *TableModel) cancelQuery() {
 	if m.cancel != nil {
 		slog.Debug("cancelling in-flight query", "schema", m.schema, "table", m.table)
@@ -96,62 +124,93 @@ func (m *TableModel) cancelQuery() {
 	}
 }
 
-// newFetch cancels any previous query, creates a new cancellable context,
-// stores its cancel func, and returns a tea.Cmd that runs the query.
-func (m *TableModel) newFetch(dir Direction, cursor []any) tea.Cmd {
+func (m *TableModel) fetchMore() tea.Cmd {
 	m.cancelQuery()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 
+	q := TableQuery{
+		Schema:   m.schema,
+		Table:    m.table,
+		Where:    m.where,
+		OrderBy:  m.orderBy,
+		PageSize: m.pageSize,
+		Offset:   len(m.rows),
+	}
 	db := m.db
-	schema, table := m.schema, m.table
-	pageSize := m.pageSize
 	return func() tea.Msg {
-		page, err := db.FetchPage(ctx, schema, table, pageSize, dir, cursor)
+		page, err := db.FetchPage(ctx, q)
 		if err != nil && ctx.Err() != nil {
-			slog.Info("query cancelled", "schema", schema, "table", table)
-			return pageLoadedMsg{schema: schema, table: table, err: fmt.Errorf("query cancelled")}
+			slog.Info("query cancelled", "schema", q.Schema, "table", q.Table)
+			return pageLoadedMsg{schema: q.Schema, table: q.Table, err: fmt.Errorf("query cancelled")}
 		}
-		return pageLoadedMsg{page: page, schema: schema, table: table, err: err}
+		if err != nil {
+			return pageLoadedMsg{schema: q.Schema, table: q.Table, err: err}
+		}
+		return pageLoadedMsg{
+			rows:    page.Rows,
+			columns: page.Columns,
+			schema:  q.Schema,
+			table:   q.Table,
+			hasMore: page.HasNext,
+		}
 	}
 }
 
 func (m TableModel) Update(msg tea.Msg) (TableModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case pageLoadedMsg:
-		// Ignore stale loads for a different table.
 		if msg.schema != m.schema || msg.table != m.table {
-			slog.Debug("ignoring stale page load", "got", msg.schema+"."+msg.table, "want", m.schema+"."+m.table)
 			return m, nil
 		}
 		m.loading = false
 		if msg.err != nil {
 			slog.Error("page load failed", "schema", msg.schema, "table", msg.table, "error", msg.err)
 			m.err = msg.err
-			m.page = nil
 			return m, nil
 		}
-		m.page = msg.page
 		m.err = nil
-		m.computeColWidths()
-		m.cursorRow = 0
-		m.scrollRow = 0
-		m.firstCursor = msg.page.FirstCursor
-		m.lastCursor = msg.page.LastCursor
+		if m.columns == nil {
+			m.columns = msg.columns
+		}
+		m.rows = append(m.rows, msg.rows...)
+		m.hasMore = msg.hasMore
+		m.recomputeColWidths(msg.rows)
 		return m, nil
 
 	case tea.KeyMsg:
 		if !m.focused {
 			return m, nil
 		}
+		if m.filtering {
+			return m.handleFilterKey(msg)
+		}
 		return m.handleKey(msg)
 	}
 	return m, nil
 }
 
+func (m TableModel) handleFilterKey(msg tea.KeyMsg) (TableModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.filtering = false
+		m.filterInput.Blur()
+		m.filterInput.SetValue(m.where)
+		return m, nil
+	case "enter":
+		m.filtering = false
+		m.filterInput.Blur()
+		m.where = strings.TrimSpace(m.filterInput.Value())
+		return m, m.resetData()
+	}
+
+	var cmd tea.Cmd
+	m.filterInput, cmd = m.filterInput.Update(msg)
+	return m, cmd
+}
+
 func (m TableModel) handleKey(msg tea.KeyMsg) (TableModel, tea.Cmd) {
-	// Escape cancels in-flight queries regardless of state.
 	if msg.String() == "esc" && m.loading {
 		m.cancelQuery()
 		m.loading = false
@@ -159,33 +218,45 @@ func (m TableModel) handleKey(msg tea.KeyMsg) (TableModel, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.page == nil || m.loading {
+	if msg.String() == "/" {
+		m.filtering = true
+		m.filterInput.SetValue(m.where)
+		m.filterInput.Focus()
+		return m, textinput.Blink
+	}
+
+	if m.columns == nil || m.loading {
 		return m, nil
 	}
 
 	switch msg.String() {
-	case "n": // next page
-		if m.page.HasNext && m.lastCursor != nil {
-			m.loading = true
-			m.pageNum++
-			return m, m.newFetch(DirForward, m.lastCursor)
+	case "J", "K":
+		col := m.columns[m.cursorCol].Name
+		dir := "ASC"
+		if msg.String() == "K" {
+			dir = "DESC"
 		}
-	case "p": // previous page
-		if m.page.HasPrev && m.firstCursor != nil {
-			m.loading = true
-			m.pageNum--
-			return m, m.newFetch(DirBackward, m.firstCursor)
-		}
+		m.orderBy = col + " " + dir
+		return m, m.resetData()
 	default:
-		m.handleNavKey(msg)
+		return m.handleNavKey(msg)
 	}
+}
 
+func (m TableModel) handleNavKey(msg tea.KeyMsg) (TableModel, tea.Cmd) {
+	m.moveCursor(msg)
+
+	// Load next batch when cursor hits the last row.
+	if m.hasMore && !m.loading && m.cursorRow >= len(m.rows)-1 {
+		m.loading = true
+		return m, m.fetchMore()
+	}
 	return m, nil
 }
 
-func (m *TableModel) handleNavKey(msg tea.KeyMsg) {
-	nRows := len(m.page.Rows)
-	nCols := len(m.page.Columns)
+func (m *TableModel) moveCursor(msg tea.KeyMsg) {
+	nRows := len(m.rows)
+	nCols := len(m.columns)
 
 	switch msg.String() {
 	case "j", "down":
@@ -208,6 +279,14 @@ func (m *TableModel) handleNavKey(msg tea.KeyMsg) {
 			m.cursorCol--
 			m.ensureColVisible()
 		}
+	case "ctrl+d":
+		half := m.visibleRows() / 2
+		m.cursorRow = min(m.cursorRow+half, nRows-1)
+		m.ensureRowVisible()
+	case "ctrl+u":
+		half := m.visibleRows() / 2
+		m.cursorRow = max(m.cursorRow-half, 0)
+		m.ensureRowVisible()
 	case "g":
 		m.cursorRow = 0
 		m.scrollRow = 0
@@ -233,16 +312,14 @@ func (m *TableModel) ensureRowVisible() {
 }
 
 func (m *TableModel) ensureColVisible() {
-	// Simple: ensure cursorCol is within the visible column window.
 	if m.cursorCol < m.scrollCol {
 		m.scrollCol = m.cursorCol
 	}
-	// Scroll right until column fits.
 	for m.scrollCol < m.cursorCol {
 		usedWidth := 0
 		fits := false
 		for c := m.scrollCol; c <= m.cursorCol && c < len(m.colWidths); c++ {
-			usedWidth += m.colWidths[c] + 3 // 3 for " | " separator
+			usedWidth += m.colWidths[c] + 3
 			if c == m.cursorCol && usedWidth <= m.width-2 {
 				fits = true
 			}
@@ -255,25 +332,32 @@ func (m *TableModel) ensureColVisible() {
 }
 
 func (m TableModel) visibleRows() int {
-	h := m.height - 5 // header row + border + status bar + padding
+	h := m.height - 6
 	if h < 1 {
 		h = 1
 	}
 	return h
 }
 
-func (m *TableModel) computeColWidths() {
-	if m.page == nil {
+// recomputeColWidths updates column widths using newly loaded rows.
+// On first load, computes from scratch. On subsequent loads, only widens.
+func (m *TableModel) recomputeColWidths(newRows [][]any) {
+	if m.columns == nil {
 		return
 	}
-	m.colWidths = make([]int, len(m.page.Columns))
-	for i, col := range m.page.Columns {
-		// Sample up to 50 rows for width estimation.
-		samples := make([]string, 0, min(len(m.page.Rows), 50))
-		for j := 0; j < len(m.page.Rows) && j < 50; j++ {
-			samples = append(samples, FormatCell(m.page.Rows[j][i]))
+	if m.colWidths == nil {
+		m.colWidths = make([]int, len(m.columns))
+		for i, col := range m.columns {
+			m.colWidths[i] = ColumnWidth(col.Name, nil, 4, maxCellWidth)
 		}
-		m.colWidths[i] = ColumnWidth(col.Name, samples, 4, maxCellWidth)
+	}
+	for i := range m.columns {
+		for _, row := range newRows {
+			sw := runewidth.StringWidth(FormatCell(row[i]))
+			if sw > m.colWidths[i] && sw <= maxCellWidth {
+				m.colWidths[i] = sw
+			}
+		}
 	}
 }
 
@@ -288,46 +372,81 @@ var (
 	tableBorderStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8"))
 	tableFocusBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("12"))
 	statusBarStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	inputLabelStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 )
 
 func (m TableModel) View() string {
 	if m.schema == "" {
 		return m.renderEmpty("Select a table from the sidebar")
 	}
-	if m.loading {
-		return m.renderEmpty("Loading...")
-	}
-	if m.err != nil {
-		return m.renderEmpty(fmt.Sprintf("Error: %s", m.err))
-	}
-	if m.page == nil || len(m.page.Rows) == 0 {
-		return m.renderEmpty(fmt.Sprintf("%s.%s: empty", m.schema, m.table))
-	}
 
 	var b strings.Builder
+
+	b.WriteString(m.renderFilterBar())
+	b.WriteString("\n")
+
+	if m.loading && len(m.rows) == 0 {
+		return m.renderContent(b.String(), "Loading...")
+	}
+	if m.err != nil && len(m.rows) == 0 {
+		return m.renderContent(b.String(), fmt.Sprintf("Error: %s", m.err))
+	}
+	if len(m.rows) == 0 {
+		return m.renderContent(b.String(), "empty")
+	}
+
+	m.renderTable(&b)
+
+	b.WriteString("\n")
+	b.WriteString(m.statusBar())
+
+	borderStyle := tableBorderStyle
+	if m.focused {
+		borderStyle = tableFocusBorder
+	}
+	return borderStyle.Width(m.width - 2).Height(m.height - 2).Render(b.String())
+}
+
+func (m TableModel) renderFilterBar() string {
+	if m.filtering {
+		return inputLabelStyle.Render("WHERE ") + m.filterInput.View()
+	}
+	if m.where != "" {
+		return statusBarStyle.Render("WHERE " + m.where)
+	}
+	return statusBarStyle.Render("/ to filter")
+}
+
+func (m TableModel) renderContent(header, msg string) string {
+	borderStyle := tableBorderStyle
+	if m.focused {
+		borderStyle = tableFocusBorder
+	}
+	body := header + "\n" + lipgloss.Place(
+		m.width-4, m.height-6, lipgloss.Center, lipgloss.Center, msg)
+	return borderStyle.Width(m.width - 2).Height(m.height - 2).Render(body)
+}
+
+func (m TableModel) renderTable(b *strings.Builder) {
 	visRows := m.visibleRows()
 	visCols := m.visibleCols()
 
-	// Header row.
-	headerLine := m.renderRow(-1, visCols)
-	b.WriteString(headerLine)
+	b.WriteString(m.renderRow(-1, visCols))
 	b.WriteString("\n")
 
-	// Separator.
 	sepWidth := 0
 	for _, c := range visCols {
 		sepWidth += m.colWidths[c] + 3
 	}
 	if sepWidth > 0 {
-		sepWidth -= 3 // no trailing separator
+		sepWidth -= 3
 	}
 	b.WriteString(strings.Repeat("─", min(sepWidth, m.width-4)))
 	b.WriteString("\n")
 
-	// Data rows.
 	endRow := m.scrollRow + visRows
-	if endRow > len(m.page.Rows) {
-		endRow = len(m.page.Rows)
+	if endRow > len(m.rows) {
+		endRow = len(m.rows)
 	}
 	for r := m.scrollRow; r < endRow; r++ {
 		b.WriteString(m.renderRow(r, visCols))
@@ -336,22 +455,10 @@ func (m TableModel) View() string {
 		}
 	}
 
-	// Pad remaining height.
 	rendered := endRow - m.scrollRow
 	for i := rendered; i < visRows; i++ {
 		b.WriteString("\n~")
 	}
-
-	// Status bar.
-	b.WriteString("\n")
-	b.WriteString(m.statusBar())
-
-	content := b.String()
-	borderStyle := tableBorderStyle
-	if m.focused {
-		borderStyle = tableFocusBorder
-	}
-	return borderStyle.Width(m.width - 2).Height(m.height - 2).Render(content)
 }
 
 func (m TableModel) renderRow(rowIdx int, visCols []int) string {
@@ -362,34 +469,25 @@ func (m TableModel) renderRow(rowIdx int, visCols []int) string {
 		var style lipgloss.Style
 
 		if rowIdx < 0 {
-			// Header.
-			cell = m.page.Columns[c].Name
-			if m.page.Columns[c].IsPK {
+			cell = m.columns[c].Name
+			if m.columns[c].IsPK {
 				cell += "*"
 			}
 			style = tableHeaderStyle
 		} else {
-			// Data.
-			raw := m.page.Rows[rowIdx][c]
+			raw := m.rows[rowIdx][c]
 			cell = FormatCell(raw)
 			if raw == nil {
 				style = tableNullStyle
-			} else if m.page.Columns[c].IsPK {
+			} else if m.columns[c].IsPK {
 				style = tablePKStyle
 			} else {
 				style = tableCellStyle
 			}
 		}
 
-		// Pad/truncate to column width.
-		runes := []rune(cell)
-		if len(runes) > w {
-			cell = string(runes[:w-1]) + "…"
-		} else if len(runes) < w {
-			cell = cell + strings.Repeat(" ", w-len(runes))
-		}
+		cell = runewidth.FillRight(runewidth.Truncate(cell, w, "…"), w)
 
-		// Highlight cursor cell.
 		if rowIdx >= 0 && rowIdx == m.cursorRow && c == m.cursorCol {
 			cell = tableCursorStyle.Render(cell)
 		} else {
@@ -401,13 +499,13 @@ func (m TableModel) renderRow(rowIdx int, visCols []int) string {
 }
 
 func (m TableModel) visibleCols() []int {
-	if m.page == nil {
+	if m.columns == nil {
 		return nil
 	}
 	var cols []int
 	usedWidth := 0
-	for c := m.scrollCol; c < len(m.page.Columns); c++ {
-		needed := m.colWidths[c] + 3 // " | "
+	for c := m.scrollCol; c < len(m.columns); c++ {
+		needed := m.colWidths[c] + 3
 		if usedWidth+needed > m.width-4 && len(cols) > 0 {
 			break
 		}
@@ -418,28 +516,25 @@ func (m TableModel) visibleCols() []int {
 }
 
 func (m TableModel) statusBar() string {
-	if m.page == nil {
-		return ""
-	}
-	nRows := len(m.page.Rows)
-	nCols := len(m.page.Columns)
+	nRows := len(m.rows)
+	nCols := len(m.columns)
 
-	nav := ""
-	if m.page.HasPrev {
-		nav += "[p]prev "
-	}
-	if m.page.HasNext {
-		nav += "[n]next "
-	}
-
-	return statusBarStyle.Render(fmt.Sprintf(
-		"%s.%s  row %d/%d  col %d/%d  page %d  %s",
+	status := fmt.Sprintf("%s.%s  row %d/%d",
 		m.schema, m.table,
-		m.cursorRow+1, nRows,
-		m.cursorCol+1, nCols,
-		m.pageNum+1,
-		nav,
-	))
+		m.cursorRow+1, nRows)
+	if m.hasMore {
+		status += "+"
+	}
+	status += fmt.Sprintf("  col %d/%d", m.cursorCol+1, nCols)
+
+	if m.orderBy != "" {
+		status += "  sort: " + m.orderBy
+	}
+	if m.loading {
+		status += "  loading..."
+	}
+
+	return statusBarStyle.Render(status)
 }
 
 func (m TableModel) renderEmpty(msg string) string {

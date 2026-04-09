@@ -126,31 +126,34 @@ func (m TreeModel) Update(msg tea.Msg) (TreeModel, tea.Cmd) {
 	return m, nil
 }
 
+func (m TreeModel) handleFilterKey(msg tea.KeyMsg) (TreeModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.filtering = false
+		m.filter.SetValue("")
+		m.filter.Blur()
+		m.applyFilter()
+		return m, nil
+	case "enter":
+		m.filtering = false
+		m.filter.Blur()
+		if len(m.filtered) == 1 && !m.filtered[0].isSchema() {
+			e := m.filtered[0]
+			return m, selectTable(e.schema, e.table)
+		}
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.filter, cmd = m.filter.Update(msg)
+		m.applyFilter()
+		m.cursor = 0
+		return m, cmd
+	}
+}
+
 func (m TreeModel) handleKey(msg tea.KeyMsg) (TreeModel, tea.Cmd) {
 	if m.filtering {
-		switch msg.String() {
-		case "esc":
-			m.filtering = false
-			m.filter.SetValue("")
-			m.filter.Blur()
-			m.applyFilter()
-			return m, nil
-		case "enter":
-			m.filtering = false
-			m.filter.Blur()
-			// If only one table visible, select it.
-			if len(m.filtered) == 1 && !m.filtered[0].isSchema() {
-				e := m.filtered[0]
-				return m, selectTable(e.schema, e.table)
-			}
-			return m, nil
-		default:
-			var cmd tea.Cmd
-			m.filter, cmd = m.filter.Update(msg)
-			m.applyFilter()
-			m.cursor = 0
-			return m, cmd
-		}
+		return m.handleFilterKey(msg)
 	}
 
 	switch msg.String() {
@@ -163,31 +166,11 @@ func (m TreeModel) handleKey(msg tea.KeyMsg) (TreeModel, tea.Cmd) {
 			m.cursor--
 		}
 	case "enter", "l", "right":
-		if m.cursor < len(m.filtered) {
-			e := m.filtered[m.cursor]
-			if e.isSchema() {
-				m.expanded[e.schema] = !m.expanded[e.schema]
-				m.applyFilter()
-			} else {
-				return m, selectTable(e.schema, e.table)
-			}
+		if cmd := m.openEntry(); cmd != nil {
+			return m, cmd
 		}
 	case "h", "left":
-		if m.cursor < len(m.filtered) {
-			e := m.filtered[m.cursor]
-			if e.isSchema() {
-				m.expanded[e.schema] = false
-				m.applyFilter()
-			} else {
-				// Jump to parent schema.
-				for i := m.cursor - 1; i >= 0; i-- {
-					if m.filtered[i].isSchema() && m.filtered[i].schema == e.schema {
-						m.cursor = i
-						break
-					}
-				}
-			}
-		}
+		m.collapseEntry()
 	case "/":
 		m.filtering = true
 		m.filter.Focus()
@@ -198,6 +181,38 @@ func (m TreeModel) handleKey(msg tea.KeyMsg) (TreeModel, tea.Cmd) {
 		m.cursor = 0
 	}
 	return m, nil
+}
+
+func (m *TreeModel) openEntry() tea.Cmd {
+	if m.cursor >= len(m.filtered) {
+		return nil
+	}
+	e := m.filtered[m.cursor]
+	if e.isSchema() {
+		m.expanded[e.schema] = !m.expanded[e.schema]
+		m.applyFilter()
+		return nil
+	}
+	return selectTable(e.schema, e.table)
+}
+
+func (m *TreeModel) collapseEntry() {
+	if m.cursor >= len(m.filtered) {
+		return
+	}
+	e := m.filtered[m.cursor]
+	if e.isSchema() {
+		m.expanded[e.schema] = false
+		m.applyFilter()
+		return
+	}
+	// Jump to parent schema.
+	for i := m.cursor - 1; i >= 0; i-- {
+		if m.filtered[i].isSchema() && m.filtered[i].schema == e.schema {
+			m.cursor = i
+			break
+		}
+	}
 }
 
 func selectTable(schema, table string) tea.Cmd {
@@ -229,21 +244,17 @@ func (m *TreeModel) applyFilter() {
 	query := strings.ToLower(m.filter.Value())
 	m.filtered = nil
 
-	for _, e := range m.allEntries {
-		if e.isSchema() {
-			if query == "" || fuzzyMatch(e.schema, query) {
+	if query == "" {
+		// No filter: show schemas, and tables under expanded schemas.
+		for _, e := range m.allEntries {
+			if e.isSchema() {
+				m.filtered = append(m.filtered, e)
+			} else if m.expanded[e.schema] {
 				m.filtered = append(m.filtered, e)
 			}
-			continue
 		}
-		// Table entry: show if schema is expanded (or filter active) and matches.
-		if query != "" {
-			if fuzzyMatch(e.table, query) || fuzzyMatch(e.schema+"."+e.table, query) {
-				m.filtered = append(m.filtered, e)
-			}
-		} else if m.expanded[e.schema] {
-			m.filtered = append(m.filtered, e)
-		}
+	} else {
+		m.applyTableFilter(query)
 	}
 
 	if m.cursor >= len(m.filtered) {
@@ -251,15 +262,26 @@ func (m *TreeModel) applyFilter() {
 	}
 }
 
-func fuzzyMatch(s, query string) bool {
-	s = strings.ToLower(s)
-	qi := 0
-	for i := 0; i < len(s) && qi < len(query); i++ {
-		if s[i] == query[qi] {
-			qi++
+func (m *TreeModel) applyTableFilter(query string) {
+	// Filter matches table names only (substring). Schemas appear
+	// as headers when at least one of their tables matches.
+	curSchema := ""
+	schemaAdded := false
+	for _, e := range m.allEntries {
+		if e.isSchema() {
+			curSchema = e.schema
+			schemaAdded = false
+			continue
 		}
+		if !strings.Contains(strings.ToLower(e.table), query) {
+			continue
+		}
+		if !schemaAdded {
+			m.filtered = append(m.filtered, treeEntry{schema: curSchema})
+			schemaAdded = true
+		}
+		m.filtered = append(m.filtered, e)
 	}
-	return qi == len(query)
 }
 
 // --- View ---
@@ -284,7 +306,7 @@ func (m TreeModel) View() string {
 	if m.filtering {
 		b.WriteString(m.filter.View())
 	} else if m.filter.Value() != "" {
-		b.WriteString(fmt.Sprintf(" filter: %s", m.filter.Value()))
+		fmt.Fprintf(&b, " filter: %s", m.filter.Value())
 	}
 	b.WriteString("\n")
 

@@ -162,6 +162,28 @@ func (m TableModel) handleKey(msg tea.KeyMsg) (TableModel, tea.Cmd) {
 	if m.page == nil || m.loading {
 		return m, nil
 	}
+
+	switch msg.String() {
+	case "n": // next page
+		if m.page.HasNext && m.lastCursor != nil {
+			m.loading = true
+			m.pageNum++
+			return m, m.newFetch(DirForward, m.lastCursor)
+		}
+	case "p": // previous page
+		if m.page.HasPrev && m.firstCursor != nil {
+			m.loading = true
+			m.pageNum--
+			return m, m.newFetch(DirBackward, m.firstCursor)
+		}
+	default:
+		m.handleNavKey(msg)
+	}
+
+	return m, nil
+}
+
+func (m *TableModel) handleNavKey(msg tea.KeyMsg) {
 	nRows := len(m.page.Rows)
 	nCols := len(m.page.Columns)
 
@@ -186,18 +208,6 @@ func (m TableModel) handleKey(msg tea.KeyMsg) (TableModel, tea.Cmd) {
 			m.cursorCol--
 			m.ensureColVisible()
 		}
-	case "n": // next page
-		if m.page.HasNext && m.lastCursor != nil {
-			m.loading = true
-			m.pageNum++
-			return m, m.newFetch(DirForward, m.lastCursor)
-		}
-	case "p": // previous page
-		if m.page.HasPrev && m.firstCursor != nil {
-			m.loading = true
-			m.pageNum--
-			return m, m.newFetch(DirBackward, m.firstCursor)
-		}
 	case "g":
 		m.cursorRow = 0
 		m.scrollRow = 0
@@ -211,8 +221,6 @@ func (m TableModel) handleKey(msg tea.KeyMsg) (TableModel, tea.Cmd) {
 		m.cursorCol = nCols - 1
 		m.ensureColVisible()
 	}
-
-	return m, nil
 }
 
 func (m *TableModel) ensureRowVisible() {

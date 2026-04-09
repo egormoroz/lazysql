@@ -137,14 +137,38 @@ var helpBarStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
 // --- Entrypoint ---
 
+const defaultPageSize = 100
+
+func connectDB(ctx context.Context, connURL string, cfg *Config) (*DB, int, error) {
+	if connURL != "" {
+		slog.Info("starting pgviewer", "mode", "url")
+		db, err := NewDB(ctx, connURL)
+		return db, defaultPageSize, err
+	}
+	if cfg != nil {
+		slog.Info("starting pgviewer", "mode", "config")
+		db, err := NewDB(ctx, cfg.Connections[0].URL)
+		return db, cfg.PageSize, err
+	}
+	url := os.Getenv("PGVIEWER_URL")
+	if url == "" {
+		url = os.Getenv("DATABASE_URL")
+	}
+	if url == "" {
+		return nil, 0, fmt.Errorf(
+			"no connection specified: use --url, --config, or set PGVIEWER_URL / DATABASE_URL")
+	}
+	slog.Info("starting pgviewer", "mode", "env")
+	db, err := NewDB(ctx, url)
+	return db, defaultPageSize, err
+}
+
 func main() {
 	configPath := flag.String("config", "", "path to config YAML file")
 	connURL := flag.String("url", "", "postgres connection URL (overrides config)")
 	logFile := flag.String("log", "", "log file path (default: /tmp/pgviewer.log)")
 	flag.Parse()
 
-	var db *DB
-	var pageSize int
 	ctx := context.Background()
 
 	// Determine log file: flag > config > default.
@@ -176,45 +200,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "warning: could not open log file: %v\n", logErr)
 	}
 
-	switch {
-	case *connURL != "":
-		slog.Info("starting pgviewer", "mode", "url")
-		pageSize = 100
-		var err error
-		db, err = NewDB(ctx, *connURL)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-
-	case cfg != nil:
-		slog.Info("starting pgviewer", "mode", "config", "config", *configPath)
-		pageSize = cfg.PageSize
-		var err error
-		db, err = NewDB(ctx, cfg.Connections[0].URL)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error connecting to %s: %v\n", cfg.Connections[0].Name, err)
-			os.Exit(1)
-		}
-
-	default:
-		url := os.Getenv("PGVIEWER_URL")
-		if url == "" {
-			url = os.Getenv("DATABASE_URL")
-		}
-		if url == "" {
-			fmt.Fprintln(os.Stderr, "usage: pgviewer --url postgres://... | --config config.yaml")
-			fmt.Fprintln(os.Stderr, "  or set PGVIEWER_URL / DATABASE_URL environment variable")
-			os.Exit(1)
-		}
-		slog.Info("starting pgviewer", "mode", "env")
-		pageSize = 100
-		var err error
-		db, err = NewDB(ctx, url)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
+	db, pageSize, err := connectDB(ctx, *connURL, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 

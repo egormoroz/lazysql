@@ -47,18 +47,31 @@ const (
 )
 
 func NewDB(ctx context.Context, connURL string) (*DB, error) {
-	slog.Info("connecting to database")
-	pool, err := pgxpool.New(ctx, connURL)
+	cfg, err := pgxpool.ParseConfig(connURL)
 	if err != nil {
-		slog.Error("connection failed", "error", err)
+		slog.Error("invalid connection URL", "error", err)
+		return nil, fmt.Errorf("parse dsn: %w", err)
+	}
+	cc := cfg.ConnConfig
+	slog.Info("connecting to database",
+		"host", cc.Host, "port", cc.Port,
+		"database", cc.Database, "user", cc.User)
+
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		slog.Error("connection failed", "error", err,
+			"host", cc.Host, "port", cc.Port)
 		return nil, fmt.Errorf("connect: %w", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		slog.Error("ping failed", "error", err)
+		slog.Error("ping failed", "error", err,
+			"host", cc.Host, "port", cc.Port)
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	slog.Info("connected to database")
+	slog.Info("connected to database",
+		"host", cc.Host, "port", cc.Port,
+		"database", cc.Database, "user", cc.User)
 	return &DB{pool: pool}, nil
 }
 
@@ -73,6 +86,8 @@ func (db *DB) Schemas(ctx context.Context) ([]string, error) {
 		SELECT schema_name
 		FROM information_schema.schemata
 		WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
+		  AND schema_name NOT LIKE 'pg\_temp\_%'
+		  AND schema_name NOT LIKE 'pg\_toast\_temp\_%'
 		ORDER BY schema_name`)
 	if err != nil {
 		slog.Error("schemas query failed", "error", err)
@@ -274,13 +289,95 @@ func (db *DB) FetchPage(
 		return nil, fmt.Errorf("columns: %w", err)
 	}
 
+	query, args := buildKeysetQuery(schema, table, pkCols, dir, cursor, pageSize)
+	slog.Debug("executing query", "sql", query, "args", args)
+	rows, err := db.pool.Query(ctx, query, args...)
+	if err != nil {
+		slog.Error("query failed", "sql", query, "error", err)
+		return nil, fmt.Errorf("query: %w", err)
+	}
+	defer rows.Close()
+
+	page, err := assembleKeysetPage(rows, cols, pkCols, dir, pageSize)
+	if err != nil {
+		return nil, err
+	}
+
+	slog.Info("page fetched",
+		"schema", schema, "table", table,
+		"rows", len(page.Rows), "hasNext", page.HasNext, "hasPrev", page.HasPrev,
+		"duration", time.Since(start),
+	)
+	return page, nil
+}
+
+func assembleKeysetPage(
+	rows pgx.Rows, cols []TableColumn, pkCols []string,
+	dir Direction, pageSize int,
+) (*KeysetPage, error) {
+	descs := rows.FieldDescriptions()
+	var allRows [][]any
+	for rows.Next() {
+		vals, err := rows.Values()
+		if err != nil {
+			return nil, err
+		}
+		allRows = append(allRows, vals)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	hasMore := len(allRows) > pageSize
+	if hasMore {
+		allRows = allRows[:pageSize]
+	}
+
+	// Backward fetch returns rows in reverse order — flip them.
+	if dir == DirBackward {
+		for i, j := 0, len(allRows)-1; i < j; i, j = i+1, j-1 {
+			allRows[i], allRows[j] = allRows[j], allRows[i]
+		}
+	}
+
+	page := &KeysetPage{
+		Columns: cols,
+		Rows:    allRows,
+		PKCols:  pkCols,
+	}
+
+	switch dir {
+	case DirFirst:
+		page.HasPrev = false
+		page.HasNext = hasMore
+	case DirForward:
+		page.HasPrev = true
+		page.HasNext = hasMore
+	case DirBackward:
+		page.HasPrev = hasMore
+		page.HasNext = true
+	}
+
+	if len(allRows) > 0 {
+		page.FirstCursor = extractCursor(allRows[0], descs, pkCols)
+		page.LastCursor = extractCursor(allRows[len(allRows)-1], descs, pkCols)
+	}
+	return page, nil
+}
+
+func buildKeysetQuery(
+	schema, table string,
+	pkCols []string,
+	dir Direction,
+	cursor []any,
+	pageSize int,
+) (string, []any) {
 	fqTable := pgx.Identifier{schema, table}.Sanitize()
 	orderCols := make([]string, len(pkCols))
 	for i, c := range pkCols {
 		orderCols[i] = pgx.Identifier{c}.Sanitize()
 	}
 
-	// Build query.
 	var qb strings.Builder
 	qb.WriteString("SELECT * FROM ")
 	qb.WriteString(fqTable)
@@ -289,7 +386,6 @@ func (db *DB) FetchPage(
 	ascending := dir != DirBackward
 
 	if dir != DirFirst && len(cursor) == len(pkCols) {
-		// Keyset WHERE clause using row-value comparison.
 		qb.WriteString(" WHERE (")
 		qb.WriteString(strings.Join(orderCols, ", "))
 		qb.WriteString(")")
@@ -322,73 +418,7 @@ func (db *DB) FetchPage(
 	}
 
 	fmt.Fprintf(&qb, " LIMIT %d", pageSize+1)
-
-	query := qb.String()
-	slog.Debug("executing query", "sql", query, "args", args)
-	rows, err := db.pool.Query(ctx, query, args...)
-	if err != nil {
-		slog.Error("query failed", "sql", query, "error", err)
-		return nil, fmt.Errorf("query: %w", err)
-	}
-	defer rows.Close()
-
-	descs := rows.FieldDescriptions()
-	var allRows [][]any
-	for rows.Next() {
-		vals, err := rows.Values()
-		if err != nil {
-			return nil, err
-		}
-		allRows = append(allRows, vals)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	// Detect overflow (has more pages in this direction).
-	hasMore := len(allRows) > pageSize
-	if hasMore {
-		allRows = allRows[:pageSize]
-	}
-
-	// Backward fetch returns rows in reverse order — flip them.
-	if !ascending {
-		for i, j := 0, len(allRows)-1; i < j; i, j = i+1, j-1 {
-			allRows[i], allRows[j] = allRows[j], allRows[i]
-		}
-	}
-
-	page := &KeysetPage{
-		Columns: cols,
-		Rows:    allRows,
-		PKCols:  pkCols,
-	}
-
-	// Determine has-next/has-prev based on direction and overflow.
-	switch dir {
-	case DirFirst:
-		page.HasPrev = false
-		page.HasNext = hasMore
-	case DirForward:
-		page.HasPrev = true // we came from somewhere
-		page.HasNext = hasMore
-	case DirBackward:
-		page.HasPrev = hasMore
-		page.HasNext = true // we came from somewhere
-	}
-
-	// Extract cursors from first and last rows.
-	if len(allRows) > 0 {
-		page.FirstCursor = extractCursor(allRows[0], descs, pkCols)
-		page.LastCursor = extractCursor(allRows[len(allRows)-1], descs, pkCols)
-	}
-
-	slog.Info("page fetched",
-		"schema", schema, "table", table,
-		"rows", len(allRows), "hasNext", page.HasNext, "hasPrev", page.HasPrev,
-		"duration", time.Since(start),
-	)
-	return page, nil
+	return qb.String(), args
 }
 
 // extractCursor pulls PK column values from a row by matching column names.
